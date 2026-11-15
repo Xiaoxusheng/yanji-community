@@ -102,6 +102,19 @@ export default function UserProfilePage() {
             <button className="btn btn-primary btn-sm" onClick={followUser}>
               + 关注
             </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={async () => {
+                try {
+                  const res = await api.post<{ conversation: { id: number } }>("/conversations", { target_id: p.id });
+                  window.location.href = `/messages?conv=${res.conversation.id}`;
+                } catch (e) {
+                  toast("error", (e as Error).message);
+                }
+              }}
+            >
+              发私信
+            </button>
             <button className="btn btn-secondary btn-sm" onClick={blockUser}>
               拉黑
             </button>

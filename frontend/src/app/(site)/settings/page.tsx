@@ -158,12 +158,13 @@ function PrivacyTab() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["me-profile"],
     queryFn: () =>
-      api.get<{ profile: { profile_visibility: string; show_followers: boolean; notify_email: boolean; notify_inapp: boolean } }>("/me/profile"),
+      api.get<{ profile: { profile_visibility: string; show_followers: boolean; notify_email: boolean; notify_inapp: boolean; allow_direct_messages?: boolean } }>("/me/profile"),
   });
   const [visibility, setVisibility] = useState("public");
   const [showFollowers, setShowFollowers] = useState(true);
   const [notifyEmail, setNotifyEmail] = useState(true);
   const [notifyInapp, setNotifyInapp] = useState(true);
+  const [allowDm, setAllowDm] = useState(true);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -172,6 +173,7 @@ function PrivacyTab() {
       setShowFollowers(data.profile.show_followers);
       setNotifyEmail(data.profile.notify_email);
       setNotifyInapp(data.profile.notify_inapp);
+      setAllowDm(data.profile.allow_direct_messages !== false);
     }
   }, [data]);
 
@@ -186,6 +188,7 @@ function PrivacyTab() {
         show_followers: showFollowers,
         notify_email: notifyEmail,
         notify_inapp: notifyInapp,
+        allow_direct_messages: allowDm,
       });
       toast("success", "设置已保存");
       qc.invalidateQueries({ queryKey: ["me-profile"] });
@@ -197,6 +200,7 @@ function PrivacyTab() {
   };
 
   const checks: [string, boolean, (v: boolean) => void, string][] = [
+    ["允许他人给我发私信", allowDm, setAllowDm, "关闭后其他用户无法向你发起私信（已有会话不受影响）"],
     ["公开关注/粉丝列表", showFollowers, setShowFollowers, "关闭后其他人无法查看你的关注与粉丝"],
     ["邮件通知", notifyEmail, setNotifyEmail, "重要系统邮件（验证、安全提醒）不受此开关影响"],
     ["站内通知", notifyInapp, setNotifyInapp, "关闭后仍会在通知中心保留记录"],

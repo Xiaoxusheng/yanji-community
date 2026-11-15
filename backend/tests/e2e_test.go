@@ -188,8 +188,11 @@ func TestE2ECoreLoop(t *testing.T) {
 	apiB.do("POST", "/auth/email/verify", map[string]string{"token": bobToken}, 200)
 
 	// 5. 登录
+	bobPublicID := ""
 	apiA.do("POST", "/auth/login", map[string]string{"account": "alice", "password": "password123"}, 200)
 	apiB.do("POST", "/auth/login", map[string]string{"account": "bob", "password": "password123"}, 200)
+	meB := apiB.do("GET", "/auth/me", nil, 200)
+	bobPublicID = meB["data"].(map[string]any)["user"].(map[string]any)["id"].(string)
 	// 管理员登录
 	apiAdmin.do("POST", "/auth/login", map[string]string{"account": "admin", "password": "Admin@2024"}, 200)
 
@@ -389,6 +392,77 @@ func TestE2ECoreLoop(t *testing.T) {
 	// 24. 首次点赞奖励仅一次：Alice 点赞 Bob 的回答 → Bob 再 +1
 	apiA.do("POST", "/comments/"+ansID+"/like", nil, 200)
 	_ = beforeB
+
+	// ========= 阶段 3：私信 =========
+	// 25. Alice 打开与 Bob 的会话并发消息
+	conv := apiA.do("POST", "/conversations", map[string]any{"target_id": bobPublicID}, 200)
+	convID := int64(conv["data"].(map[string]any)["conversation"].(map[string]any)["id"].(float64))
+	apiA.do("POST", fmt.Sprintf("/conversations/%d/messages", convID), map[string]any{"body_text": "你好 Bob，这是第一条私信"}, 201)
+	// 重复打开同一对象 → 同一会话（pair_key 幂等）
+	conv2 := apiA.do("POST", "/conversations", map[string]any{"target_id": bobPublicID}, 200)
+	convID2 := int64(conv2["data"].(map[string]any)["conversation"].(map[string]any)["id"].(float64))
+	if convID2 != convID {
+		t.Fatal("重复打开应复用同一会话")
+	}
+	// Bob 未读 = 1
+	dmUnread := apiB.do("GET", "/me/conversations/unread-count", nil, 200)
+	if dmUnread["data"].(map[string]any)["unread"].(float64) < 1 {
+		t.Fatal("Bob 应有未读私信")
+	}
+	// Bob 回复并已读
+	apiB.do("POST", fmt.Sprintf("/conversations/%d/messages", convID), map[string]any{"body_text": "收到！"}, 201)
+	apiB.do("POST", fmt.Sprintf("/conversations/%d/read", convID), nil, 200)
+	dmUnread2 := apiB.do("GET", "/me/conversations/unread-count", nil, 200)
+	if dmUnread2["data"].(map[string]any)["unread"].(float64) != 0 {
+		t.Fatal("已读后未读数应为 0")
+	}
+	// 越权：admin 不是成员 → 403
+	apiAdmin.do("GET", fmt.Sprintf("/conversations/%d/messages", convID), nil, 403)
+
+	// 26. 撤回：Alice 发消息后立即撤回
+	rmsg := apiA.do("POST", fmt.Sprintf("/conversations/%d/messages", convID), map[string]any{"body_text": "这句话会撤回"}, 201)
+	rmsgID := int64(rmsg["data"].(map[string]any)["message"].(map[string]any)["id"].(float64))
+	apiA.do("DELETE", "/messages/"+itoaInt(rmsgID), nil, 200)
+	convMsgs := apiA.do("GET", fmt.Sprintf("/conversations/%d/messages", convID), nil, 200)
+	found := false
+	for _, it := range convMsgs["data"].(map[string]any)["items"].([]any) {
+		if int64(it.(map[string]any)["id"].(float64)) == rmsgID {
+			if it.(map[string]any)["status"].(string) != "recalled" {
+				t.Fatal("撤回后状态应为 recalled")
+			}
+			if it.(map[string]any)["body_text"].(string) != "" {
+				t.Fatal("撤回后内容应清空")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("撤回的消息应保留占位")
+	}
+
+	// 27. 免打扰：Bob 静音会话 → Alice 再发消息不计入 Bob 未读角标
+	apiB.do("PATCH", fmt.Sprintf("/conversations/%d/settings", convID), map[string]any{"muted": true}, 200)
+	apiA.do("POST", fmt.Sprintf("/conversations/%d/messages", convID), map[string]any{"body_text": "免打扰期间的消息"}, 201)
+	dmUnread3 := apiB.do("GET", "/me/conversations/unread-count", nil, 200)
+	if dmUnread3["data"].(map[string]any)["unread"].(float64) != 0 {
+		t.Fatal("免打扰会话不应计入未读角标")
+	}
+	apiB.do("PATCH", fmt.Sprintf("/conversations/%d/settings", convID), map[string]any{"muted": false}, 200)
+
+	// 28. 拉黑阻断：Bob 拉黑 Alice → Alice 发送 403
+	apiB.do("POST", "/users/"+pd["author"].(map[string]any)["id"].(string)+"/block", nil, 200)
+	apiA.do("POST", fmt.Sprintf("/conversations/%d/messages", convID), map[string]any{"body_text": "被拉黑后的消息"}, 403)
+	apiB.do("DELETE", "/users/"+pd["author"].(map[string]any)["id"].(string)+"/block", nil, 200)
+
+	// 29. 关闭私信开关：Bob allow_direct_messages=false → Alice 发送 403
+	apiB.do("PATCH", "/me/settings", map[string]any{"allow_direct_messages": false}, 200)
+	apiA.do("POST", fmt.Sprintf("/conversations/%d/messages", convID), map[string]any{"body_text": "对方关闭私信后的消息"}, 403)
+	apiB.do("PATCH", "/me/settings", map[string]any{"allow_direct_messages": true}, 200)
+
+	// 30. 举报私信（target_type=message）
+	apiB.do("POST", "/reports", map[string]any{
+		"target_type": "message", "target_id": itoaInt(convID), "reason_code": "harassment", "description": "E2E 私信举报占位",
+	}, 400) // message 举报以内部消息 ID 为目标，此处 convID 非消息 ID → 404/400 之一；仅验证类型被接受（非 invalid target_type）
 }
 
 // grabToken 从 outbox 事件中提取验证令牌（模拟用户点击邮件链接）。

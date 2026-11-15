@@ -26,7 +26,7 @@ var validReasons = map[string]bool{
 	"infringement": true, "misinformation": true, "flame": true, "other": true,
 }
 
-var validTargets = map[string]bool{"post": true, "comment": true, "user": true}
+var validTargets = map[string]bool{"post": true, "comment": true, "user": true, "message": true}
 
 // Report 举报记录。
 type Report struct {
@@ -84,6 +84,18 @@ func (r *Repo) ResolveTarget(ctx context.Context, targetType, targetPublicID str
 			return 0, "", apperr.NotFound("举报目标不存在")
 		}
 		return id, "用户：" + username, err
+	case "message":
+		var id int64
+		var body string
+		err := r.pool.QueryRow(ctx,
+			`SELECT m.id, m.body_text FROM messages m WHERE m.id::text = $1`, targetPublicID).Scan(&id, &body)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, "", apperr.NotFound("举报目标不存在")
+		}
+		if len([]rune(body)) > 40 {
+			body = string([]rune(body)[:40]) + "…"
+		}
+		return id, "私信：" + body, err
 	}
 	return 0, "", apperr.BadRequest("VALIDATION_ERROR", "举报类型不合法")
 }
@@ -179,6 +191,13 @@ func targetLabel(ctx context.Context, pool *pgxpool.Pool, targetType string, tar
 		label = "评论：" + body
 	case "user":
 		_ = pool.QueryRow(ctx, `SELECT '用户：' || username FROM users WHERE id = $1`, targetID).Scan(&label)
+	case "message":
+		var body string
+		_ = pool.QueryRow(ctx, `SELECT body_text FROM messages WHERE id = $1`, targetID).Scan(&body)
+		if len([]rune(body)) > 40 {
+			body = string([]rune(body)[:40]) + "…"
+		}
+		label = "私信：" + body
 	}
 	return label
 }

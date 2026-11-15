@@ -7,10 +7,10 @@ import { useState } from "react";
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useMe, useUnreadCount } from "@/lib/auth";
-import { API_BASE } from "@/lib/api";
+import { api, API_BASE } from "@/lib/api";
+import { useQuery } from "@tanstack/react-query";
 import { toast } from "@/lib/toast";
 import { Avatar } from "@/components/ui/Avatar";
-import { api } from "@/lib/api";
 import { useInvalidateMe } from "@/lib/auth";
 
 // SSE 实时通知（断线自动重连由 EventSource 内建；消息本体以接口补拉为准）
@@ -25,15 +25,26 @@ function useNotificationStream(enabled: boolean) {
         toast("info", data.title || "收到新通知");
       } catch { /* 忽略解析失败 */ }
       qc.invalidateQueries({ queryKey: ["notifications"] });
+      qc.invalidateQueries({ queryKey: ["dm"] });
     });
     return () => es.close();
   }, [enabled, qc]);
+}
+
+function useDmUnread(enabled: boolean) {
+  return useQuery({
+    queryKey: ["dm", "unread"],
+    enabled,
+    refetchInterval: 30_000,
+    queryFn: () => api.get<{ unread: number }>("/me/conversations/unread-count"),
+  });
 }
 
 export function SiteHeader() {
   const router = useRouter();
   const { data: me } = useMe();
   const { data: unread } = useUnreadCount(!!me?.authenticated);
+  const { data: dmUnread } = useDmUnread(!!me?.authenticated);
   useNotificationStream(!!me?.authenticated);
   const invalidate = useInvalidateMe();
   const [q, setQ] = useState("");
@@ -92,6 +103,24 @@ export function SiteHeader() {
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <Link href="/compose" className="btn btn-primary btn-sm">
               发布
+            </Link>
+            <Link
+              href="/messages"
+              aria-label={`私信${dmUnread?.unread ? `（${dmUnread.unread} 条未读）` : ""}`}
+              style={{ position: "relative", padding: 6, borderRadius: 8, marginLeft: 2 }}
+            >
+              <span aria-hidden>💬</span>
+              {!!dmUnread?.unread && (
+                <span
+                  style={{
+                    position: "absolute", top: 0, right: -2, background: "var(--danger)", color: "#fff",
+                    borderRadius: 999, fontSize: 10, minWidth: 16, height: 16, display: "flex",
+                    alignItems: "center", justifyContent: "center", padding: "0 4px", fontWeight: 700,
+                  }}
+                >
+                  {dmUnread.unread > 99 ? "99+" : dmUnread.unread}
+                </span>
+              )}
             </Link>
             <Link
               href="/notifications"

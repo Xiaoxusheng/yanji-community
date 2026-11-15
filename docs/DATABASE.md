@@ -84,8 +84,12 @@
 - polls（post 一对一）/poll_options/poll_votes（**(user, option) 唯一**防重复投票）
 - activities/activity_participants（**(activity, user) 唯一** + 行锁保并发名额）
 - appeals（部分唯一索引：同对象同用户仅一条 pending；最佳答案：`comments(post_id) WHERE is_accepted_answer` 部分唯一索引）
-### 第三阶段（仅文档规划）
-conversations、conversation_members、messages、message_attachments。
+### 第三阶段（迁移 000009 已实现）
+- conversations（**pair_key 唯一**：1:1 会话去重）、conversation_members（成员唯一 + last_read_message_id/muted/pinned）
+- messages（正文 CHECK ≤5000、reply_to 引用、status sent/recalled、(conversation, created_at DESC) 索引）
+- message_attachments（图片消息，mime CHECK 白名单）
+- user_profiles.allow_direct_messages（私信开关，默认 TRUE）
+- 举报/通知类型扩展 message
 
 ## 3. 状态枚举（CHECK 约束强制）
 

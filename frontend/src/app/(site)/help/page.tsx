@@ -35,8 +35,7 @@ export default function HelpPage() {
       <ul>
         <li>问答帖与最佳回答、投票帖</li>
         <li>积分、等级、勋章、签到</li>
-        <li>活动报名、SSE 实时通知</li>
-        <li>私信与实时推送</li>
+        <li>知识库与 AI 智能能力</li>
       </ul>
 
       <h2>联系我们</h2>

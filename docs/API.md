@@ -135,7 +135,21 @@
 | GET | /admin/appeals · POST /admin/appeals/{id}/handle | 申诉处理（通过自动解罚） |
 | GET/POST | /admin/badges | 勋章管理 |
 
-## 9. 其他
+## 9. 阶段 3 接口（私信）
+
+| Method | Path | 说明 |
+|---|---|---|
+| GET | /me/conversations | 会话列表（置顶优先，未读数；免打扰不计角标） |
+| GET | /me/conversations/unread-count | 私信未读总数 |
+| POST | /conversations {target_id} | 打开会话（pair_key 幂等；拉黑/私信开关/状态校验） |
+| GET | /conversations/{id}/messages | 消息分页（成员校验，倒序） |
+| POST | /conversations/{id}/messages | 发送消息（文本/图片/引用；dm 桶限流 30/min） |
+| POST | /conversations/{id}/read | 标记已读 |
+| PATCH | /conversations/{id}/settings | 免打扰/置顶 |
+| DELETE | /messages/{id} | 撤回（本人，5 分钟内，保留占位） |
+| POST | /reports（target_type=message） | 举报私信 |
+
+## 10. 其他
 
 - `GET /healthz`（liveness）、`GET /readyz`（DB+Redis 就绪）、`GET /files/{key}`（本地存储静态服务）。
 - OpenAPI 规范：`docs/openapi.yaml`（阶段 1 覆盖核心资源；持续维护）。

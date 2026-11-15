@@ -378,3 +378,36 @@ export interface Appeal {
   handled_at: string | null;
   created_at: string;
 }
+
+// ---------- 阶段 3：私信 ----------
+
+export interface DmOther {
+  id: string;
+  username: string;
+  display_name: string;
+  avatar_key: string;
+}
+
+export interface Conversation {
+  id: number;
+  other: DmOther;
+  last_message: string;
+  last_message_at: string | null;
+  last_sender_me: boolean;
+  unread: number;
+  muted: boolean;
+  pinned: boolean;
+  created_at: string;
+}
+
+export interface DmMessage {
+  id: number;
+  sender: DmOther;
+  mine: boolean;
+  body_text: string;
+  image_key?: string;
+  reply_to_id?: number;
+  reply_body?: string;
+  status: string;
+  created_at: string;
+}

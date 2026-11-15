@@ -18,6 +18,7 @@ import (
 	"github.com/yanji-community/backend/internal/modules/comments"
 	"github.com/yanji-community/backend/internal/modules/follows"
 	"github.com/yanji-community/backend/internal/modules/interactions"
+	"github.com/yanji-community/backend/internal/modules/messaging"
 	"github.com/yanji-community/backend/internal/modules/moderation"
 	"github.com/yanji-community/backend/internal/modules/notifications"
 	"github.com/yanji-community/backend/internal/modules/points"
@@ -137,6 +138,11 @@ func Build(d Deps) *gin.Engine {
 	searchHandler := search.NewHandler(searchSvc)
 
 	ptsHandler := points.NewHandler(ptsSvc)
+	dmSvc := messaging.New(d.Pool, d.Logger)
+	dmSvc.PushEvent = func(ctx context.Context, recipientID int64, ev notifications.SSEEvent) {
+		notifications.PublishNotification(ctx, d.Redis, recipientID, ev)
+	}
+	dmHandler := messaging.NewHandler(dmSvc)
 	pollHandler := polls.NewHandler(pollSvc)
 	actHandler := activities.NewHandler(actSvc)
 	appealHandler := appeals.NewHandler(appealSvc)
@@ -202,6 +208,9 @@ func Build(d Deps) *gin.Engine {
 
 	// SSE 实时通知
 	api.GET("/me/notifications/stream", notifHandler.Stream)
+
+	// 私信（专属限流桶：30 条/分钟）
+	dmHandler.Register(api, httpx.RateLimit(d.Redis, "dm", 30))
 
 	// ---- 写入互动（需登录 + 验证邮箱 + 限流 write）----
 	write := api.Group("")

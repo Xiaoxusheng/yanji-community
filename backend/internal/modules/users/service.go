@@ -32,10 +32,11 @@ type UpdateProfileRequest struct {
 
 // UpdateSettingsRequest 隐私/通知设置更新。
 type UpdateSettingsRequest struct {
-	ProfileVisibility *string `json:"profile_visibility"`
-	ShowFollowers     *bool   `json:"show_followers"`
-	NotifyEmail       *bool   `json:"notify_email"`
-	NotifyInapp       *bool   `json:"notify_inapp"`
+	ProfileVisibility   *string `json:"profile_visibility"`
+	ShowFollowers       *bool   `json:"show_followers"`
+	NotifyEmail         *bool   `json:"notify_email"`
+	NotifyInapp         *bool   `json:"notify_inapp"`
+	AllowDirectMessages *bool   `json:"allow_direct_messages"`
 }
 
 func invalid(msg string) error { return apperr.BadRequest("VALIDATION_ERROR", msg) }
@@ -109,6 +110,9 @@ func (s *Service) UpdateSettings(ctx context.Context, userID int64, req UpdateSe
 	}
 	if req.NotifyInapp != nil {
 		fields["notify_inapp"] = *req.NotifyInapp
+	}
+	if req.AllowDirectMessages != nil {
+		fields["allow_direct_messages"] = *req.AllowDirectMessages
 	}
 	return s.repo.UpdateProfile(ctx, userID, fields)
 }

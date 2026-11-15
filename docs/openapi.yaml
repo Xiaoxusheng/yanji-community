@@ -1,0 +1,236 @@
+openapi: 3.1.0
+info:
+  title: yanji-community API
+  version: 1.0.0
+  description: |
+    综合社区论坛平台 /api/v1 契约（阶段 1 基线）。
+    统一响应 {code, message, data, request_id}；认证为 HttpOnly 会话 Cookie（yanji_session）。
+    完整接口说明见 docs/API.md；本文件覆盖核心资源，随阶段演进持续补充。
+servers:
+  - url: http://localhost:8080/api/v1
+components:
+  schemas:
+    Envelope:
+      type: object
+      required: [code, message, data]
+      properties:
+        code: { type: string, example: OK }
+        message: { type: string }
+        data: {}
+        request_id: { type: string }
+    Page:
+      type: object
+      properties:
+        items: { type: array, items: {} }
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer, format: int64 }
+        has_more: { type: boolean }
+    Post:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        excerpt: { type: string }
+        post_type: { type: string, enum: [discussion, article, question, poll] }
+        status: { type: string, enum: [draft, pending_review, published, rejected, hidden, locked, deleted] }
+        author: { $ref: '#/components/schemas/Author' }
+        category: { $ref: '#/components/schemas/CategoryRef' }
+        tags: { type: array, items: { $ref: '#/components/schemas/TagRef' } }
+        view_count: { type: integer }
+        like_count: { type: integer }
+        comment_count: { type: integer }
+        bookmark_count: { type: integer }
+        published_at: { type: string, format: date-time, nullable: true }
+    Author:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        display_name: { type: string }
+        avatar_key: { type: string }
+    CategoryRef:
+      type: object
+      properties: { id: { type: integer }, name: { type: string }, slug: { type: string } }
+    TagRef:
+      type: object
+      properties: { id: { type: integer }, name: { type: string }, slug: { type: string } }
+    Comment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        depth: { type: integer, maximum: 2 }
+        author: { $ref: '#/components/schemas/Author' }
+        body_rendered: { type: string }
+        like_count: { type: integer }
+        replies: { type: array, items: { $ref: '#/components/schemas/Comment' } }
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: yanji_session
+security:
+  - sessionCookie: []
+paths:
+  /auth/register:
+    post:
+      summary: 公开注册（防枚举；成功后发送验证邮件）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, email, password]
+              properties:
+                username: { type: string, pattern: '^[a-zA-Z0-9_]{3,20}$' }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8, maxLength: 72 }
+      responses: { '201': { description: 注册成功 }, '409': { description: 用户名或邮箱已被使用 }, '429': { description: 限流 } }
+  /auth/login:
+    post:
+      summary: 登录（设置会话 Cookie）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [account, password]
+              properties:
+                account: { type: string }
+                password: { type: string }
+      responses: { '200': { description: 登录成功 }, '400': { description: 凭证错误 }, '403': { description: 账号被封禁 } }
+  /auth/logout:
+    post: { summary: 退出当前会话, responses: { '200': { description: OK } } }
+  /auth/logout-all:
+    post: { summary: 退出全部会话, responses: { '200': { description: OK } } }
+  /auth/me:
+    get:
+      summary: 当前用户（游客返回 authenticated:false）
+      security: []
+      responses: { '200': { description: OK } }
+  /auth/email/verify:
+    post: { summary: 邮箱验证令牌兑换, responses: { '200': { description: OK }, '400': { description: 令牌无效或过期 } } }
+  /auth/email/resend:
+    post: { summary: 重发验证邮件（已验证静默成功）, responses: { '200': { description: OK } } }
+  /auth/password/forgot:
+    post: { summary: 发起密码重置（防枚举恒返回成功）, security: [], responses: { '200': { description: OK } } }
+  /auth/password/reset:
+    post: { summary: 重置密码并撤销全部会话, security: [], responses: { '200': { description: OK } } }
+  /auth/sessions:
+    get: { summary: 会话设备列表, responses: { '200': { description: OK } } }
+  /auth/sessions/{id}:
+    delete:
+      summary: 撤销指定会话
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { description: OK }, '404': { description: 不存在 } }
+  /feeds:
+    get:
+      summary: 首页信息流
+      security: []
+      parameters:
+        - { name: tab, in: query, schema: { type: string, enum: [latest, hot, featured, recommended, following] } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+      responses: { '200': { description: 分页帖子列表 } }
+  /posts:
+    post:
+      summary: 创建帖子/草稿（支持 Idempotency-Key）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, body_markdown, category_slug]
+              properties:
+                title: { type: string, minLength: 5, maxLength: 200 }
+                body_markdown: { type: string }
+                category_slug: { type: string }
+                post_type: { type: string, enum: [discussion, article] }
+                tag_slugs: { type: array, maxItems: 5, items: { type: string } }
+                is_draft: { type: boolean }
+      responses: { '201': { description: 已发布 }, '202': { description: 进入待审核 }, '403': { description: 未验证邮箱/受罚 }, '400': { description: 内容违规或参数错误 } }
+  /posts/{id}:
+    get:
+      summary: 帖子详情
+      security: []
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { description: OK }, '404': { description: 不存在或不可见 } }
+    patch: { summary: 编辑自己的帖子（保留修订）, responses: { '200': { description: OK }, '403': { description: 非作者 } } }
+    delete: { summary: 删除自己的帖子（软删除）, responses: { '200': { description: OK } } }
+  /posts/{id}/comments:
+    get: { summary: 评论树（顶层分页+楼中楼展开）, security: [], responses: { '200': { description: OK } } }
+    post: { summary: 创建评论/回复（深度≤3，超出转为引用回复）, responses: { '201': { description: 已发布 }, '202': { description: 待审核 }, '409': { description: POST_LOCKED } } }
+  /posts/{id}/like:
+    post: { summary: 点赞（幂等）, responses: { '200': { description: OK } } }
+    delete: { summary: 取消点赞（幂等）, responses: { '200': { description: OK } } }
+  /posts/{id}/bookmark:
+    post: { summary: 收藏（user+post 唯一约束幂等）, responses: { '200': { description: OK } } }
+    delete: { summary: 取消收藏, responses: { '200': { description: OK } } }
+  /comments/{id}:
+    patch: { summary: 编辑自己的评论, responses: { '200': { description: OK } } }
+    delete: { summary: 删除评论（作者/版主）, responses: { '200': { description: OK } } }
+  /comments/{id}/like:
+    post: { summary: 评论点赞（幂等）, responses: { '200': { description: OK } } }
+    delete: { summary: 取消评论点赞, responses: { '200': { description: OK } } }
+  /categories:
+    get: { summary: 公开版块列表, security: [], responses: { '200': { description: OK } } }
+  /categories/{slug}/posts:
+    get: { summary: 版块帖子列表（置顶优先）, security: [], responses: { '200': { description: OK } } }
+  /tags/{slug}/posts:
+    get: { summary: 标签帖子列表, security: [], responses: { '200': { description: OK } } }
+  /search:
+    get:
+      summary: 统一搜索（帖子全文+高亮/用户/版块/标签）
+      security: []
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string, enum: [post, user, category, tag] } }
+        - { name: sort, in: query, schema: { type: string, enum: [relevance, latest, hot] } }
+      responses: { '200': { description: OK } }
+  /me/notifications:
+    get: { summary: 通知列表（unread/type 筛选）, responses: { '200': { description: OK } } }
+  /me/notifications/unread-count:
+    get: { summary: 未读数, responses: { '200': { description: OK } } }
+  /me/notifications/read-all:
+    post: { summary: 全部已读, responses: { '200': { description: OK } } }
+  /reports:
+    post: { summary: 提交举报（同对象处理中防重）, responses: { '201': { description: OK }, '409': { description: 重复举报 } } }
+  /uploads:
+    post:
+      summary: 上传图片（扩展名+MIME+魔数+大小四重校验）
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+      responses: { '201': { description: 返回 key/url }, '400': { description: 校验失败 } }
+  /admin/dashboard:
+    get: { summary: 仪表盘（dashboard.read）, responses: { '200': { description: OK }, '403': { description: 无权限 } } }
+  /admin/users:
+    get: { summary: 用户列表（user.read）, responses: { '200': { description: OK } } }
+  /admin/users/{id}/sanctions:
+    post: { summary: 创建处罚（user.sanction；写审计+通知）, responses: { '200': { description: OK } } }
+  /admin/posts/{id}/moderate:
+    post:
+      summary: 帖子管理动作（post.moderate；版主限授权版块）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [approve, reject, hide, restore, lock, unlock, pin, unpin, feature, unfeature, move_category] }
+                reason: { type: string }
+                category_slug: { type: string }
+      responses: { '200': { description: OK }, '403': { description: 越权版块 } }
+  /admin/reports/{id}/resolve:
+    post: { summary: 处理举报（report.handle）, responses: { '200': { description: OK } } }
+  /admin/settings:
+    get: { summary: 系统配置（settings.manage）, responses: { '200': { description: OK } } }
+    patch: { summary: 批量更新配置（写审计）, responses: { '200': { description: OK } } }
+  /admin/operation-logs:
+    get: { summary: 审计日志（audit.read）, responses: { '200': { description: OK } } }

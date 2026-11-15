@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS outbox_events;
+DROP TABLE IF EXISTS system_configs;
+DROP TABLE IF EXISTS operation_logs;
+DROP TABLE IF EXISTS featured_items;
+DROP TABLE IF EXISTS announcements;
+DROP TABLE IF EXISTS sensitive_words;
+DROP TABLE IF EXISTS user_sanctions;
+DROP TABLE IF EXISTS moderation_actions;
+DROP TABLE IF EXISTS reports;
+DROP TABLE IF EXISTS notifications;

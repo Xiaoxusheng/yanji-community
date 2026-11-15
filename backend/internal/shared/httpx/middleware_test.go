@@ -1,0 +1,47 @@
+package httpx
+
+import (
+	"testing"
+	"time"
+)
+
+func TestSanctionChecks(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour)
+	past := time.Now().UTC().Add(-time.Hour)
+
+	cases := []struct {
+		name        string
+		u           *AuthUser
+		wantMuted   bool
+		wantCanPost bool
+		wantCanCmt  bool
+	}{
+		{"无处罚", &AuthUser{}, false, true, true},
+		{"警告", &AuthUser{SanctionType: "warn"}, false, true, true},
+		{"禁言", &AuthUser{SanctionType: "mute"}, true, true, false},
+		{"禁发帖", &AuthUser{SanctionType: "post_ban"}, true, false, true},
+		{"临时封禁生效中", &AuthUser{SanctionType: "temp_ban", SanctionEnds: &future}, true, false, false},
+		{"临时封禁已过期", &AuthUser{SanctionType: "temp_ban", SanctionEnds: &past}, false, true, true},
+		{"永久封禁", &AuthUser{SanctionType: "perma_ban"}, true, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.u.Muted(); got != c.wantMuted {
+				t.Fatalf("Muted() = %v, want %v", got, c.wantMuted)
+			}
+			if got := c.u.CanPost(); got != c.wantCanPost {
+				t.Fatalf("CanPost() = %v, want %v", got, c.wantCanPost)
+			}
+			if got := c.u.CanComment(); got != c.wantCanCmt {
+				t.Fatalf("CanComment() = %v, want %v", got, c.wantCanCmt)
+			}
+		})
+	}
+}
+
+func TestVerifiedNilSafe(t *testing.T) {
+	var u *AuthUser
+	if u.Verified() {
+		t.Fatal("nil 用户不应为已验证")
+	}
+}

@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS comments;
+DROP TABLE IF EXISTS post_attachments;
+DROP TABLE IF EXISTS post_tags;
+DROP TABLE IF EXISTS post_revisions;
+DROP TABLE IF EXISTS posts;

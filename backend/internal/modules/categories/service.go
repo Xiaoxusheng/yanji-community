@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yanji-community/backend/internal/shared/apperr"
+	httpx "github.com/yanji-community/backend/internal/shared/httpx"
 	"github.com/yanji-community/backend/internal/shared/respond"
 )
 
@@ -171,6 +172,15 @@ func (s *Service) Delete(ctx context.Context, id int64) error {
 	return s.repo.SoftDelete(ctx, id)
 }
 
+// IsFollowing 是否关注了版块。
+func (s *Service) IsFollowing(ctx context.Context, userID, categoryID int64) (bool, error) {
+	var exists bool
+	err := s.repo.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM category_follows WHERE category_id = $1 AND user_id = $2)`,
+		categoryID, userID).Scan(&exists)
+	return exists, err
+}
+
 // Moderators / AddModerator / RemoveModerator。
 func (s *Service) Moderators(ctx context.Context, categoryID int64) ([]Moderator, error) {
 	list, err := s.repo.ListModerators(ctx, categoryID)
@@ -225,7 +235,11 @@ func (h *Handler) Get(c *gin.Context) {
 		return
 	}
 	mods, _ := h.svc.Moderators(c.Request.Context(), cat.ID)
-	respond.OK(c, gin.H{"category": cat, "moderators": mods})
+	isFollowing := false
+	if u := httpx.CurrentUser(c); u != nil {
+		isFollowing, _ = h.svc.IsFollowing(c.Request.Context(), u.ID, cat.ID)
+	}
+	respond.OK(c, gin.H{"category": cat, "moderators": mods, "is_following": isFollowing})
 }
 
 // AdminList GET /admin/categories

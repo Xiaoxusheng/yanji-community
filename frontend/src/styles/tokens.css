@@ -1,0 +1,78 @@
+/* Design Tokens —— 前台设计系统唯一来源（UI_SPEC） */
+:root {
+  /* 中性色 */
+  --bg-page: #f7f8fa;
+  --bg-card: #ffffff;
+  --bg-hover: #f0f2f5;
+  --bg-inset: #f4f5f7;
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+
+  /* 文本 */
+  --text-1: #111827;
+  --text-2: #4b5563;
+  --text-3: #9ca3af;
+  --text-inverse: #ffffff;
+
+  /* 品牌与语义色 */
+  --brand: #4f46e5;
+  --brand-hover: #4338ca;
+  --brand-soft: #eef2ff;
+  --success: #16a34a;
+  --success-soft: #ecfdf5;
+  --warning: #d97706;
+  --warning-soft: #fffbeb;
+  --danger: #dc2626;
+  --danger-soft: #fef2f2;
+  --info: #2563eb;
+  --info-soft: #eff6ff;
+
+  /* 圆角 / 阴影 / 间距 */
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow-pop: 0 8px 24px rgba(16, 24, 40, 0.12);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --content-max: 1120px;
+  --reading-max: 720px;
+}
+
+/* 暗色模式：跟随系统偏好，token 全量映射 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-page: #0f1117;
+    --bg-card: #171a23;
+    --bg-hover: #1f2430;
+    --bg-inset: #1c202b;
+    --border: #2a2f3d;
+    --border-strong: #3a4152;
+    --text-1: #e5e7eb;
+    --text-2: #9ca3af;
+    --text-3: #6b7280;
+    --brand: #818cf8;
+    --brand-hover: #a5b4fc;
+    --brand-soft: #232743;
+    --success-soft: #10251a;
+    --warning-soft: #2a2213;
+    --danger-soft: #2c1517;
+    --info-soft: #14203a;
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.55);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

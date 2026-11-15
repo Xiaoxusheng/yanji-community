@@ -16,6 +16,54 @@ type Handler struct{ svc *Service }
 // NewHandler 构造。
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 
+// TagPosts GET /tags/:slug/posts
+func (h *Handler) TagPosts(c *gin.Context) {
+	pq, err := pagination.Parse(c)
+	if err != nil {
+		respond.Fail(c, err)
+		return
+	}
+	tag, err := h.svc.deps.Tags.GetBySlug(c.Request.Context(), c.Param("slug"))
+	if err != nil {
+		respond.Fail(c, err)
+		return
+	}
+	var viewerID int64
+	if u := httpx.CurrentUser(c); u != nil {
+		viewerID = u.ID
+	}
+	items, total, err := h.svc.ListByTag(c.Request.Context(), tag.ID, viewerID, pq.PageSize, pq.Offset)
+	if err != nil {
+		respond.Fail(c, err)
+		return
+	}
+	respond.Page(c, items, pq.Page, pq.PageSize, total)
+}
+
+// CategoryPosts GET /categories/:slug/posts
+func (h *Handler) CategoryPosts(c *gin.Context) {
+	pq, err := pagination.Parse(c)
+	if err != nil {
+		respond.Fail(c, err)
+		return
+	}
+	cat, err := h.svc.deps.Cats.GetBySlug(c.Request.Context(), c.Param("slug"))
+	if err != nil {
+		respond.Fail(c, err)
+		return
+	}
+	var viewerID int64
+	if u := httpx.CurrentUser(c); u != nil {
+		viewerID = u.ID
+	}
+	items, total, err := h.svc.ListByCategory(c.Request.Context(), cat, viewerID, c.DefaultQuery("sort", "latest"), pq.PageSize, pq.Offset)
+	if err != nil {
+		respond.Fail(c, err)
+		return
+	}
+	respond.Page(c, items, pq.Page, pq.PageSize, total)
+}
+
 // RegisterPublic 公开路由。
 func (h *Handler) RegisterPublic(rg *gin.RouterGroup) {
 	rg.GET("/feeds", h.Feeds)

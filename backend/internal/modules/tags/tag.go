@@ -244,6 +244,11 @@ func (s *Service) AttachTx(ctx context.Context, tx pgx.Tx, postID int64, tagIDs 
 	return s.repo.AttachTx(ctx, tx, postID, tagIDs)
 }
 
+// GetBySlug 标签详情。
+func (s *Service) GetBySlug(ctx context.Context, slug string) (*Tag, error) {
+	return s.repo.GetBySlug(ctx, slug)
+}
+
 // TagsForPost 单帖标签。
 func (s *Service) TagsForPost(ctx context.Context, postID int64) ([]Tag, error) {
 	return s.repo.TagsForPost(ctx, postID)

@@ -159,6 +159,8 @@ func Build(d Deps) *gin.Engine {
 		userHandler.RegisterPublic(pub)
 		catHandler.RegisterPublic(pub)
 		tagHandler.RegisterPublic(pub)
+		pub.GET("/categories/:slug/posts", postHandler.CategoryPosts)
+		pub.GET("/tags/:slug/posts", postHandler.TagPosts)
 		searchHandler.Register(pub)
 		pub.GET("/announcements", adminHandler.PublicAnnouncements)
 		pub.GET("/settings/public", adminHandler.PublicSettings)

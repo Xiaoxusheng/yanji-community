@@ -131,6 +131,10 @@ func setup(t *testing.T) (*pgxpool.Pool, *httptest.Server, *outbox.Dispatcher) {
 
 	dispatcher := outbox.NewDispatcher(pool, log)
 	notifications.RegisterConsumer(dispatcher, pool, nil)
+	// 启动 Outbox 投递循环（通知消费依赖它）；测试结束停止
+	dmCtx, dmCancel := context.WithCancel(context.Background())
+	go dispatcher.Run(dmCtx)
+	t.Cleanup(dmCancel)
 	notifications.RegisterEmailHandlers(dispatcher, mailer.NewLogMailer(log), cfg)
 
 	rbacSvc := rbac.New(pool)

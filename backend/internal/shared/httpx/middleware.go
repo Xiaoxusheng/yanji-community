@@ -139,6 +139,28 @@ func CORS(allowOrigins []string) gin.HandlerFunc {
 	}
 }
 
+// OriginCheck 对不安全方法校验 Origin 头（存在时必须属于允许来源）。
+// 浏览器跨站请求必带 Origin → 拒绝即缓解 CSRF；非浏览器客户端（curl/服务间调用）无 Origin 放行。
+func OriginCheck(allowOrigins []string) gin.HandlerFunc {
+	allowed := map[string]bool{}
+	for _, o := range allowOrigins {
+		allowed[strings.TrimRight(o, "/")] = true
+	}
+	return func(c *gin.Context) {
+		switch c.Request.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			c.Next()
+			return
+		}
+		origin := c.GetHeader("Origin")
+		if origin == "" || allowed[origin] {
+			c.Next()
+			return
+		}
+		apperr.RespondError(c, apperr.Forbidden("非法来源请求"))
+	}
+}
+
 // SecureHeaders 添加基础安全响应头。
 func SecureHeaders() gin.HandlerFunc {
 	return func(c *gin.Context) {

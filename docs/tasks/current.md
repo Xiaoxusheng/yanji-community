@@ -54,7 +54,19 @@
   撤回占位、免打扰不计角标、拉黑 403、关闭私信 403）
 - 后端 11 包 test 全绿；前端 lint/tsc/build 全绿
 
+### P0/P1/P2 补强（本次完成）
+- [x] P0 依赖漏洞：postcss high → overrides 固定 ^8.5.33；minimatch moderate（dev 链，11.x 破坏 eslintrc，保留记录）
+- [x] P0 CI：.github/workflows/ci.yml——后端 gofmt/build/vet/test；集成 job 用真实 PG18+Redis8 服务容器
+      跑 tests E2E（迁移 000001-000009 首次真实执行）；前端 npm ci/lint/build
+- [x] P0 服务器验收脚本 scripts/server-e2e.sh（--full 含完整栈健康检查+10 步演示清单）
+- [x] P1 Idempotency-Key：httpx.Idempotency 中间件（缓存响应 8h 重放；进行中 409；5xx 不缓存），挂 POST/PATCH /posts
+- [x] P1 CSRF：httpx.OriginCheck（不安全方法 Origin 白名单校验，非浏览器放行）
+- [x] P1 通知偏好：notify_inapp=false 跳过社交类站内通知（moderation/system 保留）
+- [x] P2 OpenAPI：补阶段 2/3 全部接口（积分/问答/投票/活动/申诉/私信/SSE/后台增强）
+- [x] E2E 装置修复：setup 启动 Outbox dispatcher（通知消费依赖）
+- 后端 11 包全绿；前端 lint/tsc/build 全绿
+
 ### 下一步
-1. Docker 环境真实运行联调（迁移 000001–000009 + 演示链路）。
-2. 知识库/AI 扩展（规划中，按需立项）。
-3. 可选优化：WebSocket 传输层替换 SSE、消息表情回应、积分规则配置化、sqlc、S3 驱动。
+1. 推送后盯 CI 集成 job（E2E 首次真实执行），修复暴露问题至全绿。
+2. 家里服务器运行 scripts/server-e2e.sh --full 做完整栈联调。
+3. 剩余 P1/P2 项：验证码、账号注销、批量移动版块/标签、仪表盘补全、活动签到码（按需）。

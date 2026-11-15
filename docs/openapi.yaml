@@ -234,3 +234,109 @@ paths:
     patch: { summary: 批量更新配置（写审计）, responses: { '200': { description: OK } } }
   /admin/operation-logs:
     get: { summary: 审计日志（audit.read）, responses: { '200': { description: OK } } }
+  /me/points:
+    get: { summary: 积分账户（余额/等级/签到状态）, responses: { '200': { description: OK } } }
+  /me/points/transactions:
+    get: { summary: 积分流水（幂等键去重后的可信账本）, responses: { '200': { description: OK } } }
+  /me/check-in:
+    post: { summary: 每日签到（DB 主键防重，+5 分）, responses: { '200': { description: OK，already=true 表示今日已签 } } }
+  /badges:
+    get: { summary: 勋章列表（含持有者计数）, security: [], responses: { '200': { description: OK } } }
+  /users/{username}/badges:
+    get:
+      summary: 用户勋章
+      security: []
+      parameters: [{ name: username, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: OK } }
+  /comments/{id}/accept:
+    post:
+      summary: 采纳最佳回答（仅提问者；每帖唯一 partial unique index）
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { description: OK }, '400': { description: 非问答帖/自采/非顶层 }, '403': { description: 非提问者 } }
+    delete: { summary: 取消采纳, responses: { '200': { description: OK } } }
+  /posts/{id}/poll:
+    get:
+      summary: 投票结果（票数/百分比/我的投票）
+      security: []
+      responses: { '200': { description: OK } }
+  /posts/{id}/poll/vote:
+    post:
+      summary: 投票（唯一约束防重；allow_revote 时可改票）
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [option_ids]
+              properties:
+                option_ids: { type: array, items: { type: integer } }
+      responses: { '200': { description: OK }, '409': { description: 重复投票/已截止 } }
+  /activities:
+    get: { summary: 活动列表, security: [], responses: { '200': { description: OK } } }
+  /activities/{id}/join:
+    post:
+      summary: 报名（FOR UPDATE 行锁 + 唯一约束 + 容量检查，并发安全）
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { description: OK }, '409': { description: 名额已满/报名截止 } }
+    delete: { summary: 取消报名, responses: { '200': { description: OK } } }
+  /appeals:
+    post:
+      summary: 提交申诉（处罚/管理操作；开放申诉唯一）
+      responses: { '201': { description: OK }, '409': { description: 已有待处理申诉 } }
+  /me/appeals:
+    get: { summary: 我的申诉记录, responses: { '200': { description: OK } } }
+  /me/conversations:
+    get:
+      summary: 私信会话列表（置顶优先，未读数；免打扰不计角标）
+      responses: { '200': { description: OK } }
+  /me/conversations/unread-count:
+    get: { summary: 私信未读总数, responses: { '200': { description: OK } } }
+  /conversations:
+    post:
+      summary: 打开 1:1 会话（pair_key 幂等；拉黑/私信开关/账号状态校验）
+      responses: { '200': { description: OK }, '403': { description: 存在拉黑或对方已关闭私信 } }
+  /conversations/{id}/messages:
+    get:
+      summary: 消息分页（倒序，成员校验）
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { description: OK }, '403': { description: 非成员 } }
+    post:
+      summary: 发送消息（文本≤5000/图片/引用；dm 桶限流 30/min；先落库后推送 SSE）
+      responses: { '201': { description: OK }, '403': { description: 防骚扰拦截 } }
+  /conversations/{id}/read:
+    post: { summary: 标记会话已读, responses: { '200': { description: OK } } }
+  /conversations/{id}/settings:
+    patch: { summary: 免打扰/置顶设置, responses: { '200': { description: OK } } }
+  /messages/{id}:
+    delete: { summary: 撤回消息（本人，5 分钟内，保留占位）, responses: { '200': { description: OK }, '409': { description: 超时/已撤回 } } }
+  /me/notifications/stream:
+    get:
+      summary: SSE 实时通知（notification.created / 私信到达；心跳 25s；先落库后推送，断线补拉以数据库为准）
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+  /admin/posts/batch-moderate:
+    post:
+      summary: 批量审核（≤50，逐条范围校验，结果明细+汇总审计）
+      responses: { '200': { description: 逐条结果 }, '400': { description: 超限/动作不支持 } }
+  /admin/users/{id}/points-adjust:
+    post: { summary: 积分调整（备注必填，写流水+审计）, responses: { '200': { description: OK } } }
+  /admin/users/{id}/badges:
+    post: { summary: 授予勋章, responses: { '200': { description: OK } } }
+    delete: { summary: 收回勋章, responses: { '200': { description: OK } } }
+  /admin/appeals:
+    get: { summary: 申诉队列（report.handle）, responses: { '200': { description: OK } } }
+  /admin/appeals/{id}/handle:
+    post:
+      summary: 处理申诉（通过则解除处罚，历史保留）
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { description: OK } }
+  /admin/activities:
+    get: { summary: 活动管理列表, responses: { '200': { description: OK } } }
+    post: { summary: 创建活动, responses: { '201': { description: OK } } }
+  /admin/activities/{id}/attend:
+    post: { summary: 标记出席并发放积分奖励, responses: { '200': { description: OK } } }

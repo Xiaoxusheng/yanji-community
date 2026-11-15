@@ -59,6 +59,7 @@ func Build(d Deps) *gin.Engine {
 	r.Use(httpx.RequestID(d.Cfg.RequestIDHeader))
 	r.Use(httpx.Recovery(d.Logger))
 	r.Use(httpx.CORS(d.Cfg.CORSAllowOrigins))
+	r.Use(httpx.OriginCheck(d.Cfg.CORSAllowOrigins))
 	r.Use(httpx.SecureHeaders())
 
 	// 健康检查
@@ -224,7 +225,11 @@ func Build(d Deps) *gin.Engine {
 		answerHandler.Register(write)
 		appealHandler.RegisterUser(write)
 
-		postsWrite := write.Group("")
+		// 帖子创建/编辑：Idempotency-Key 去重（缓存响应 8h 重放）
+		idemWrite := write.Group("")
+		idemWrite.Use(httpx.Idempotency(d.Redis, 8*time.Hour))
+
+		postsWrite := idemWrite.Group("")
 		postsWrite.Use(httpx.RequireVerified(), httpx.RequireCanPost())
 		postHandler.RegisterAuth(postsWrite)
 

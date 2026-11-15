@@ -2,21 +2,28 @@
 
 // 私信中心：会话列表 + 聊天面板（桌面双栏，移动端切换）。
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, fileURL, timeAgo, type PageData } from "@/lib/api";
-import type { Conversation, DmMessage } from "@/lib/types";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
+import { api, timeAgo, type PageData } from "@/lib/api";
+import type { Conversation } from "@/lib/types";
 import { Avatar } from "@/components/ui/Avatar";
 import { ListSkeleton, ErrorState, EmptyState } from "@/components/ui/States";
 import { AuthShell } from "@/components/auth/forms";
 import { useMe } from "@/lib/auth";
-import { toast } from "@/lib/toast";
 import { ChatPanel } from "@/components/dm/ChatPanel";
 
-export default function MessagesPage() {
+function MessagesInner() {
   const { data: me, isLoading: meLoading } = useMe();
+  const searchParams = useSearchParams();
   const [activeId, setActiveId] = useState<number | null>(null);
   const [mobileChat, setMobileChat] = useState(false);
+
+  // 支持 /messages?conv=<id> 直达会话
+  useEffect(() => {
+    const conv = searchParams.get("conv");
+    if (conv) setActiveId(Number(conv) || null);
+  }, [searchParams]);
 
   const conversations = useQuery({
     enabled: !!me?.authenticated,
@@ -110,5 +117,13 @@ export default function MessagesPage() {
       </div>
       <style>{`@media (max-width: 640px){ .dm-back{display:inline-flex} }`}</style>
     </div>
+  );
+}
+
+export default function MessagesPage() {
+  return (
+    <Suspense>
+      <MessagesInner />
+    </Suspense>
   );
 }

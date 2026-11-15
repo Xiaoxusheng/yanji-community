@@ -39,10 +39,19 @@ type Payload struct {
 }
 
 // EmitTx 在业务事务内写入通知事件（与主数据同事务提交，保证可靠）。
-// recipient == actor 时不产生自通知。
+// recipient == actor 时不产生自通知；用户关闭站内通知时跳过社交类通知
+// （moderation/system 类保留，确保处罚与系统消息不丢失）。
 func EmitTx(ctx context.Context, tx pgx.Tx, p Payload) error {
 	if p.RecipientID == 0 || p.RecipientID == p.ActorID {
 		return nil
+	}
+	switch p.Type {
+	case TypeComment, TypeReply, TypeMention, TypeLikePost, TypeLikeComment, TypeFollow, "message":
+		var inapp bool
+		if err := tx.QueryRow(ctx,
+			`SELECT notify_inapp FROM user_profiles WHERE user_id = $1`, p.RecipientID).Scan(&inapp); err == nil && !inapp {
+			return nil
+		}
 	}
 	return outbox.EmitTx(ctx, tx, "notification.created", p.RecipientID, p)
 }

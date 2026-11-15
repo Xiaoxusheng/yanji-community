@@ -66,6 +66,12 @@
 - [x] E2E 装置修复：setup 启动 Outbox dispatcher（通知消费依赖）
 - 后端 11 包全绿；前端 lint/tsc/build 全绿
 
+### CI 首跑修复记录
+- 根因：.gitignore 无锚点 `uploads/` 把源码包 backend/internal/modules/uploads/ 整个忽略，
+  upload.go 从未入库（本地可编译掩盖了问题）→ CI go build 报 no required module provides package
+- 修复：gitignore 改为锚定 /data/ /uploads/；补入 upload.go（磁盘/仓库 .go 73=73 核对一致；
+  迁移 SQL 与 frontend/src 文件数同样核对无遗漏）
+
 ### 下一步
 1. 推送后盯 CI 集成 job（E2E 首次真实执行），修复暴露问题至全绿。
 2. 家里服务器运行 scripts/server-e2e.sh --full 做完整栈联调。

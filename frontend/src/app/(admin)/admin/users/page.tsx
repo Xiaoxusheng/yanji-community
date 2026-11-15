@@ -8,7 +8,7 @@ import {
   Modal, Form, Select as AntSelect, message, Tabs, Popconfirm,
 } from "antd";
 import { api, timeAgo, type PageData } from "@/lib/api";
-import type { UserRow, SanctionRow, RoleRow } from "@/lib/types";
+import type { UserRow, SanctionRow, RoleRow, Badge } from "@/lib/types";
 
 const statusColors: Record<string, string> = {
   active: "green", pending: "blue", suspended: "orange", banned: "red", deleted: "default",
@@ -25,6 +25,10 @@ export default function AdminUsersPage() {
   const [detail, setDetail] = useState<UserRow | null>(null);
   const [sanctionOpen, setSanctionOpen] = useState(false);
   const [roleOpen, setRoleOpen] = useState(false);
+  const [pointOpen, setPointOpen] = useState(false);
+  const [badgeOpen, setBadgeOpen] = useState(false);
+  const [pointForm] = Form.useForm();
+  const [badgeForm] = Form.useForm();
   const [form] = Form.useForm();
   const [roleForm] = Form.useForm();
 
@@ -173,6 +177,8 @@ export default function AdminUsersPage() {
         extra={
           <Space>
             <Button size="small" onClick={() => setRoleOpen(true)}>授予角色</Button>
+            <Button size="small" onClick={() => setPointOpen(true)}>调整积分</Button>
+            <Button size="small" onClick={() => setBadgeOpen(true)}>授予勋章</Button>
             <Button size="small" danger onClick={() => setSanctionOpen(true)}>创建处罚</Button>
             {detail?.status === "banned" && (
               <Popconfirm title="确认解封该用户？" onConfirm={unban}>
@@ -247,6 +253,57 @@ export default function AdminUsersPage() {
         )}
       </Drawer>
 
+      <Modal
+        title="调整积分"
+        open={pointOpen}
+        onCancel={() => setPointOpen(false)}
+        onOk={() => pointForm.submit()}
+        okText="确认调整"
+      >
+        <Form form={pointForm} layout="vertical" onFinish={async (v) => {
+          try {
+            await api.post(`/admin/users/${detail!.id}/points-adjust`, { amount: Number(v.amount), note: v.note });
+            message.success("积分已调整");
+            setPointOpen(false);
+            pointForm.resetFields();
+            qc.invalidateQueries({ queryKey: ["admin-user", detail?.id] });
+          } catch (e) {
+            message.error((e as Error).message);
+          }
+        }}>
+          <Form.Item name="amount" label="调整数额（正数增加 / 负数扣减）" rules={[{ required: true, message: "请输入数额" }]}>
+            <Input type="number" min={-100000} max={100000} placeholder="如 50 或 -10" />
+          </Form.Item>
+          <Form.Item name="note" label="调整说明（写入积分流水与审计日志）" rules={[{ required: true, message: "必须填写说明" }]}>
+            <Input.TextArea rows={2} maxLength={200} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="授予勋章"
+        open={badgeOpen}
+        onCancel={() => setBadgeOpen(false)}
+        onOk={() => badgeForm.submit()}
+        okText="授予"
+      >
+        <Form form={badgeForm} layout="vertical" onFinish={async (v) => {
+          try {
+            await api.post(`/admin/users/${detail!.id}/badges`, { badge_id: v.badge_id });
+            message.success("勋章已授予");
+            setBadgeOpen(false);
+            badgeForm.resetFields();
+            qc.invalidateQueries({ queryKey: ["admin-user", detail?.id] });
+          } catch (e) {
+            message.error((e as Error).message);
+          }
+        }}>
+          <Form.Item name="badge_id" label="选择勋章" rules={[{ required: true, message: "请选择勋章" }]}>
+            <BadgesSelect />
+          </Form.Item>
+        </Form>
+      </Modal>
+
       <Modal title="创建处罚" open={sanctionOpen} onCancel={() => setSanctionOpen(false)} onOk={() => form.submit()} okText="确认处罚">
         <Form form={form} layout="vertical" onFinish={createSanction}>
           <Form.Item name="sanction_type" label="处罚类型" rules={[{ required: true }]} initialValue="warn">
@@ -303,6 +360,21 @@ export default function AdminUsersPage() {
         </Form>
       </Modal>
     </Card>
+  );
+}
+
+function BadgesSelect({ value, onChange }: { value?: number; onChange?: (v: number) => void }) {
+  const { data } = useQuery({
+    queryKey: ["admin-badges"],
+    queryFn: () => api.get<{ items: Badge[] }>("/admin/badges"),
+  });
+  return (
+    <Select
+      placeholder="选择勋章"
+      value={value}
+      onChange={onChange}
+      options={(data?.items ?? []).filter((b) => b.is_enabled).map((b) => ({ value: b.id, label: `${b.icon} ${b.name}` }))}
+    />
   );
 }
 

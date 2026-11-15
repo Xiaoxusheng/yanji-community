@@ -12,6 +12,8 @@ import (
 
 	"github.com/yanji-community/backend/internal/modules/categories"
 	"github.com/yanji-community/backend/internal/modules/moderation"
+	"github.com/yanji-community/backend/internal/modules/points"
+	"github.com/yanji-community/backend/internal/modules/polls"
 	"github.com/yanji-community/backend/internal/modules/tags"
 	"github.com/yanji-community/backend/internal/shared/apperr"
 	"github.com/yanji-community/backend/internal/shared/markdown"
@@ -31,6 +33,8 @@ type Deps struct {
 	MaxTags int
 	Follows FollowsProvider
 	Users   UsersProvider
+	Points  *points.Service
+	Polls   *polls.Service
 }
 
 // Service 帖子业务。
@@ -243,9 +247,9 @@ func (s *Service) Create(ctx context.Context, authorID int64, authorName string,
 		return "", "", err
 	}
 	switch req.PostType {
-	case "", TypeDiscussion, TypeArticle:
+	case "", TypeDiscussion, TypeArticle, TypeQuestion, TypePoll:
 	default:
-		return "", "", invalid("暂不支持该帖子类型（问答/投票为规划中功能）")
+		return "", "", invalid("不支持的帖子类型")
 	}
 	cat, err := s.deps.Cats.GetBySlug(ctx, req.CategorySlug)
 	if err != nil {
@@ -298,9 +302,21 @@ func (s *Service) Create(ctx context.Context, authorID int64, authorName string,
 	if err := s.deps.Tags.AttachTx(ctx, tx, id, tagIDs); err != nil {
 		return "", "", apperr.Internal(err)
 	}
+	if req.PostType == TypePoll {
+		if s.deps.Polls == nil {
+			return "", "", apperr.Internal(errPollsMissing)
+		}
+		if err := s.deps.Polls.CreateForPostTx(ctx, tx, id, req.Poll); err != nil {
+			return "", "", err
+		}
+	}
 	if status == StatusPublished {
 		if _, err := tx.Exec(ctx, `UPDATE categories SET post_count = post_count + 1 WHERE id = $1`, cat.ID); err != nil {
 			return "", "", apperr.Internal(err)
+		}
+		if s.deps.Points != nil {
+			_ = s.deps.Points.RewardPostPublished(ctx, tx, id, authorID)
+			_ = s.deps.Points.AwardBadgeTx(ctx, tx, authorID, "first_post", 0)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -432,6 +448,9 @@ func (s *Service) Publish(ctx context.Context, actorID int64, publicID string) (
 		if _, err := tx.Exec(ctx, `UPDATE categories SET post_count = post_count + 1 WHERE id = $1`, cat.ID); err != nil {
 			return "", apperr.Internal(err)
 		}
+		if s.deps.Points != nil {
+			_ = s.deps.Points.RewardPostPublished(ctx, tx, row.ID, actorID)
+		}
 	}
 	return status, tx.Commit(ctx)
 }
@@ -526,3 +545,5 @@ func (s *Service) accountAge(ctx context.Context, userID int64) time.Duration {
 func (s *Service) GetMarkdown(ctx context.Context, postID int64) (string, error) {
 	return s.repo.GetMarkdown(ctx, postID)
 }
+
+var errPollsMissing = apperr.Internal(nil)

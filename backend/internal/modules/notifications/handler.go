@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 
 	httpx "github.com/yanji-community/backend/internal/shared/httpx"
 	"github.com/yanji-community/backend/internal/shared/pagination"
@@ -11,10 +12,19 @@ import (
 )
 
 // Handler 通知 HTTP 层。
-type Handler struct{ svc *Service }
+type Handler struct {
+	svc *Service
+	rdb *redis.Client // SSE 推送用（可空）
+}
 
 // NewHandler 构造。
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+
+// SetRedis 注入 Redis 客户端（SSE 用，可空）。
+func (h *Handler) SetRedis(r *redis.Client) { h.rdb = r }
+
+// Stream GET /me/notifications/stream —— SSE 实时通知。
+func (h *Handler) Stream(c *gin.Context) { StreamHandler(h.rdb)(c) }
 
 // Register 注册路由（全部需登录）。
 func (h *Handler) Register(rg *gin.RouterGroup) {

@@ -1,0 +1,14 @@
+DROP INDEX IF EXISTS idx_comments_accepted_unique;
+ALTER TABLE comments DROP COLUMN IF EXISTS is_accepted_answer;
+DROP TABLE IF EXISTS appeals;
+DROP TABLE IF EXISTS activity_participants;
+DROP TABLE IF EXISTS activities;
+DROP TABLE IF EXISTS poll_votes;
+DROP TABLE IF EXISTS poll_options;
+DROP TABLE IF EXISTS polls;
+DROP TABLE IF EXISTS user_badges;
+DROP TABLE IF EXISTS badges;
+DROP TABLE IF EXISTS levels;
+DROP TABLE IF EXISTS sign_ins;
+DROP TABLE IF EXISTS point_transactions;
+DROP TABLE IF EXISTS point_accounts;

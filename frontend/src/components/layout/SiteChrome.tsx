@@ -4,16 +4,37 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useMe, useUnreadCount } from "@/lib/auth";
+import { API_BASE } from "@/lib/api";
+import { toast } from "@/lib/toast";
 import { Avatar } from "@/components/ui/Avatar";
 import { api } from "@/lib/api";
 import { useInvalidateMe } from "@/lib/auth";
-import { toast } from "@/lib/toast";
+
+// SSE 实时通知（断线自动重连由 EventSource 内建；消息本体以接口补拉为准）
+function useNotificationStream(enabled: boolean) {
+  const qc = useQueryClient();
+  useEffect(() => {
+    if (!enabled || typeof window === "undefined" || !window.EventSource) return;
+    const es = new EventSource(`${API_BASE}/me/notifications/stream`, { withCredentials: true });
+    es.addEventListener("notification", (e) => {
+      try {
+        const data = JSON.parse((e as MessageEvent).data);
+        toast("info", data.title || "收到新通知");
+      } catch { /* 忽略解析失败 */ }
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+    });
+    return () => es.close();
+  }, [enabled, qc]);
+}
 
 export function SiteHeader() {
   const router = useRouter();
   const { data: me } = useMe();
   const { data: unread } = useUnreadCount(!!me?.authenticated);
+  useNotificationStream(!!me?.authenticated);
   const invalidate = useInvalidateMe();
   const [q, setQ] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -47,6 +68,7 @@ export function SiteHeader() {
         <nav style={{ display: "flex", gap: 4, alignItems: "center" }} aria-label="主导航">
           <Link href="/" className="btn btn-text">首页</Link>
           <Link href="/categories" className="btn btn-text">版块</Link>
+          <Link href="/activities" className="btn btn-text">活动</Link>
           <Link href="/help" className="btn btn-text">规则</Link>
         </nav>
         <form
@@ -131,6 +153,12 @@ export function SiteHeader() {
                   </Link>
                   <Link href="/me/bookmarks" role="menuitem" className="btn btn-text" style={{ width: "100%", justifyContent: "flex-start" }}>
                     我的收藏
+                  </Link>
+                  <Link href="/me/points" role="menuitem" className="btn btn-text" style={{ width: "100%", justifyContent: "flex-start" }}>
+                    积分中心
+                  </Link>
+                  <Link href="/activities" role="menuitem" className="btn btn-text" style={{ width: "100%", justifyContent: "flex-start" }}>
+                    社区活动
                   </Link>
                   <Link href="/settings" role="menuitem" className="btn btn-text" style={{ width: "100%", justifyContent: "flex-start" }}>
                     账号设置

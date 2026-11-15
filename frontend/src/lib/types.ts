@@ -51,6 +51,7 @@ export interface PostDetail extends PostItem {
 
 export interface CommentNode {
   id: string;
+  is_accepted_answer?: boolean;
   post_id?: string;
   parent_id?: string;
   quote_id?: string;
@@ -271,4 +272,109 @@ export interface FolderRow {
   name: string;
   sort_order: number;
   count: number;
+}
+
+// ---------- 阶段 2 ----------
+
+export interface LevelInfo {
+  level: number;
+  name: string;
+  min_points: number;
+  color: string;
+}
+
+export interface PointAccount {
+  balance: number;
+  total_earned: number;
+  level: LevelInfo;
+  next_level?: LevelInfo | null;
+  signin_days: number;
+  streak_days: number;
+  today_signed: boolean;
+}
+
+export interface PointTransaction {
+  id: number;
+  amount: number;
+  balance_after: number;
+  source_type: string;
+  note: string;
+  created_at: string;
+}
+
+export interface Badge {
+  id: number;
+  code: string;
+  name: string;
+  description: string;
+  icon: string;
+  condition_type: "manual" | "auto";
+  is_enabled: boolean;
+  holder_count?: number;
+  created_at: string;
+}
+
+export interface PollOption {
+  id: number;
+  content: string;
+  votes: number;
+  percent: number;
+}
+
+export interface Poll {
+  id: number;
+  post_id: number;
+  multiple_choice: boolean;
+  max_choices: number;
+  allow_revote: boolean;
+  ends_at: string | null;
+  expired: boolean;
+  total_voters: number;
+  my_votes: number[];
+  options: PollOption[];
+}
+
+export interface Activity {
+  id: number;
+  title: string;
+  description: string;
+  cover_key: string;
+  location: string;
+  starts_at: string;
+  ends_at: string | null;
+  signup_starts_at: string | null;
+  signup_ends_at: string | null;
+  capacity: number;
+  participant_count: number;
+  status: string;
+  reward_points: number;
+  created_by_name: string;
+  is_joined: boolean;
+  created_at: string;
+}
+
+export interface Sanction {
+  id: number;
+  sanction_type: string;
+  reason: string;
+  starts_at: string;
+  ends_at: string | null;
+  status: string;
+  created_at: string;
+  lifted_at: string | null;
+}
+
+export interface Appeal {
+  id: number;
+  user_id: number;
+  username: string;
+  target_type: string;
+  target_id: number;
+  target_label: string;
+  reason: string;
+  status: string;
+  handled_by: string;
+  handle_note: string;
+  handled_at: string | null;
+  created_at: string;
 }

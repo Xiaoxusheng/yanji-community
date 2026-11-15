@@ -78,8 +78,12 @@
 | system_configs | key UNIQUE, value TEXT, value_type, description, is_public bool, updated_by |
 | outbox_events | event_type, aggregate_id, payload JSONB, status(pending/processing/done/failed), attempts, next_retry_at, last_error；idx(status, next_retry_at) |
 
-### 第二阶段（仅文档规划，不建表）
-point_accounts、point_transactions、levels、badges、user_badges、polls、poll_options、poll_votes、activities、activity_participants、appeals。
+### 第二阶段（迁移 000008 已实现）
+- point_accounts（余额/累计，CHECK >= 0）、point_transactions（**幂等键唯一**、余额快照可校准、来源 CHECK 枚举）
+- sign_ins（(user, date) 主键防重）、levels（7 级种子）、badges/user_badges（(user,badge) 唯一）
+- polls（post 一对一）/poll_options/poll_votes（**(user, option) 唯一**防重复投票）
+- activities/activity_participants（**(activity, user) 唯一** + 行锁保并发名额）
+- appeals（部分唯一索引：同对象同用户仅一条 pending；最佳答案：`comments(post_id) WHERE is_accepted_answer` 部分唯一索引）
 ### 第三阶段（仅文档规划）
 conversations、conversation_members、messages、message_attachments。
 

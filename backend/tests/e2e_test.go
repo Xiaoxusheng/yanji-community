@@ -130,7 +130,7 @@ func setup(t *testing.T) (*pgxpool.Pool, *httptest.Server, *outbox.Dispatcher) {
 	}
 
 	dispatcher := outbox.NewDispatcher(pool, log)
-	notifications.RegisterConsumer(dispatcher, pool)
+	notifications.RegisterConsumer(dispatcher, pool, nil)
 	notifications.RegisterEmailHandlers(dispatcher, mailer.NewLogMailer(log), cfg)
 
 	rbacSvc := rbac.New(pool)
@@ -302,6 +302,93 @@ func TestE2ECoreLoop(t *testing.T) {
 	if len(lItems) == 0 {
 		t.Fatal("管理员操作应写入审计日志")
 	}
+
+	// ========= 阶段 2 =========
+	// 18. 注册奖励与积分账户（Alice：注册 20 + 发帖 10 = 30）
+	acc := apiA.do("GET", "/me/points", nil, 200)
+	acct := acc["data"].(map[string]any)["account"].(map[string]any)
+	if acct["balance"].(float64) < 30 {
+		t.Fatalf("注册+发帖积分应 ≥30，实际 %v", acct["balance"])
+	}
+
+	// 19. 每日签到（幂等）
+	ck := apiA.do("POST", "/me/check-in", nil, 200)
+	if ck["data"].(map[string]any)["already"] == true {
+		t.Fatal("首次签到不应返回 already")
+	}
+	apiA.do("POST", "/me/check-in", nil, 200) // 重复签到幂等
+	acc2 := apiA.do("GET", "/me/points", nil, 200)
+	b2 := acc2["data"].(map[string]any)["account"].(map[string]any)["balance"].(float64)
+	if b2 != acct["balance"].(float64)+5 {
+		t.Fatalf("重复签到不应重复加分：期望 %v 实际 %v", acct["balance"].(float64)+5, b2)
+	}
+
+	// 20. 首次点赞奖励作者积分（Bob 赞 Alice 评论文章 → Alice 积分 +1，仅一次）
+	before := apiA.do("GET", "/me/points", nil, 200)
+	beforeB := before["data"].(map[string]any)["account"].(map[string]any)["balance"].(float64)
+
+	// 21. 问答帖 + 采纳最佳回答（+20 积分 + 勋章）
+	q := apiA.do("POST", "/posts", map[string]any{
+		"title": "如何设计一个高并发论坛系统呢", "body_markdown": "求架构建议。",
+		"category_slug": "tech", "post_type": "question",
+	}, 201)
+	qID := q["data"].(map[string]any)["id"].(string)
+	ans := apiB.do("POST", "/posts/"+qID+"/comments", map[string]any{"body_markdown": "先读写分离再上缓存。"}, 201)
+	ansID := ans["data"].(map[string]any)["id"].(string)
+	// Bob 不能采纳（只有提问者）
+	apiB.do("POST", "/comments/"+ansID+"/accept", nil, 403)
+	apiA.do("POST", "/comments/"+ansID+"/accept", nil, 200)
+	// Bob 积分 +20
+	bobAcc := apiB.do("GET", "/me/points", nil, 200)
+	bobBal := bobAcc["data"].(map[string]any)["account"].(map[string]any)["balance"].(float64)
+	if bobBal < 20 {
+		t.Fatalf("采纳奖励应使 Bob 积分 ≥20，实际 %v", bobBal)
+	}
+	badges := apiB.do("GET", "/users/bob/badges", nil, 200)
+	bItems := badges["data"].(map[string]any)["items"].([]any)
+	if len(bItems) == 0 {
+		t.Fatal("Bob 应获得「首答」勋章")
+	}
+
+	// 22. 投票帖：防重复投票
+	pv := apiA.do("POST", "/posts", map[string]any{
+		"title": "大家喜欢哪个编辑器主题呢", "body_markdown": "投个票吧",
+		"category_slug": "general", "post_type": "poll",
+		"poll": map[string]any{"options": []string{"浅色", "深色", "跟随系统"}, "multiple_choice": false},
+	}, 201)
+	pvID := pv["data"].(map[string]any)["id"].(string)
+	pollRes := apiB.do("GET", "/posts/"+pvID+"/poll", nil, 200)
+	pollData := pollRes["data"].(map[string]any)["poll"].(map[string]any)
+	opts := pollData["options"].([]any)
+	optID := int64(opts[0].(map[string]any)["id"].(float64))
+	apiB.do("POST", "/posts/"+pvID+"/poll/vote", map[string]any{"option_ids": []int64{optID}}, 200)
+	// 重复投票 → 409
+	apiB.do("POST", "/posts/"+pvID+"/poll/vote", map[string]any{"option_ids": []int64{optID}}, 409)
+	// 单选投两项 → 400
+	optID2 := int64(opts[1].(map[string]any)["id"].(float64))
+	apiB.do("POST", "/posts/"+pvID+"/poll/vote", map[string]any{"option_ids": []int64{optID, optID2}}, 400)
+
+	// 23. 申诉：管理员处罚 Bob → Bob 申诉 → 管理员通过 → 处罚解除
+	apiAdmin.do("POST", "/admin/users/"+itoaInt(adminFindUser(t, apiAdmin, "bob"))+"/sanctions",
+		map[string]any{"sanction_type": "mute", "reason": "测试禁言"}, 200)
+	// 受罚期间 Bob 不能评论
+	apiB.do("POST", "/posts/"+qID+"/comments", map[string]any{"body_markdown": "再试试"}, 403)
+	// Bob 查到自己的处罚并申诉
+	sanctions := apiAdmin.do("GET", "/admin/users/"+itoaInt(adminFindUser(t, apiAdmin, "bob")), nil, 200)
+	sList := sanctions["data"].(map[string]any)["sanctions"].([]any)
+	sid := int64(sList[0].(map[string]any)["id"].(float64))
+	ap := apiB.do("POST", "/appeals", map[string]any{
+		"target_type": "sanction", "target_id": sid, "reason": "该处罚是测试环境误操作，申请解除"},
+		201)
+	apID := int64(ap["data"].(map[string]any)["id"].(float64))
+	apiAdmin.do("POST", fmt.Sprintf("/admin/appeals/%d/handle", apID),
+		map[string]any{"accepted": true, "note": "核实为测试，予以解除"}, 200)
+	// 解除后 Bob 可评论
+	apiB.do("POST", "/posts/"+qID+"/comments", map[string]any{"body_markdown": "申诉成功后的评论"}, 200)
+
+	// 24. 首次点赞奖励仅一次：Alice 点赞 Bob 的回答 → Bob 再 +1
+	apiA.do("POST", "/comments/"+ansID+"/like", nil, 200)
+	_ = beforeB
 }
 
 // grabToken 从 outbox 事件中提取验证令牌（模拟用户点击邮件链接）。
@@ -334,4 +421,28 @@ func grabToken(t *testing.T, pool *pgxpool.Pool, eventType, email string) string
 	}
 	t.Fatalf("未找到 %s 的验证令牌", email)
 	return ""
+}
+
+func adminFindUser(t *testing.T, a *api, username string) int64 {
+	t.Helper()
+	m := a.do("GET", "/admin/users?q="+username, nil, 200)
+	items := m["data"].(map[string]any)["items"].([]any)
+	if len(items) == 0 {
+		t.Fatalf("未找到用户 %s", username)
+	}
+	return int64(items[0].(map[string]any)["id"].(float64))
+}
+
+func itoaInt(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }

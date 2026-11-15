@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,7 +22,16 @@ type Service struct {
 
 	sessionTTL time.Duration
 	publicURL  string
+	points     pointsRegistrar
 }
+
+// pointsRegistrar 注册积分奖励接口（由 points 模块实现，避免循环依赖）。
+type pointsRegistrar interface {
+	GrantTx(ctx context.Context, tx pgx.Tx, userID int64, sourceType string, sourceID int64, idempotencyKey string, amount int64, note string, operatorID int64) error
+}
+
+// SetPoints 注入积分服务（注册奖励）。
+func (s *Service) SetPoints(p pointsRegistrar) { s.points = p }
 
 // New 构造认证服务。
 func New(pool *pgxpool.Pool, logger *slog.Logger, sessionTTL time.Duration, publicURL string) *Service {
@@ -72,6 +82,13 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) error {
 	}
 	if err := EmitVerificationEmail(ctx, tx, u.Email, u.Username, token); err != nil {
 		return apperr.Internal(err)
+	}
+	// 注册奖励（幂等键：registration:{uid}）
+	if s.points != nil {
+		if err := s.points.GrantTx(ctx, tx, u.ID, "registration", u.ID,
+			"registration:"+itoa64(u.ID), 20, "加入社区奖励", 0); err != nil {
+			return apperr.Internal(err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return apperr.Internal(err)
@@ -286,3 +303,5 @@ func deviceFromUA(ua string) string {
 
 // strings 引用
 var _ = errors.Is
+
+func itoa64(n int64) string { return strconv.FormatInt(n, 10) }

@@ -28,6 +28,9 @@ function ComposeInner() {
   const [category, setCategory] = useState(presetCategory);
   const [tagInput, setTagInput] = useState("");
   const [tags, setTags] = useState<string[]>([]);
+  const [postType, setPostType] = useState("discussion");
+  const [pollOptions, setPollOptions] = useState<string[]>(["", ""]);
+  const [pollMultiple, setPollMultiple] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
   const [editLoading, setEditLoading] = useState(!!editId);
@@ -143,10 +146,14 @@ function ComposeInner() {
     if (title.trim().length < 5) next.push("标题至少 5 个字");
     if (!category) next.push("请选择版块");
     if (!body.trim()) next.push("正文不能为空");
-    if (next.length) {
-      toast("error", next.join("；"));
-      return;
-    }
+    if (postType === "poll") {
+        const opts = pollOptions.map((o) => o.trim()).filter(Boolean);
+        if (opts.length < 2) next.push("投票至少需要 2 个选项");
+      }
+      if (next.length) {
+        toast("error", next.join("；"));
+        return;
+      }
     setSubmitting(true);
     try {
       let id = editId ?? "";
@@ -159,7 +166,15 @@ function ComposeInner() {
       } else {
         const res = await api.post<{ id: string; status: string }>("/posts", {
           title, body_markdown: body, category_slug: category,
-          post_type: "discussion", tag_slugs: tags,
+          post_type: postType, tag_slugs: tags,
+          ...(postType === "poll"
+            ? {
+                poll: {
+                  options: pollOptions.map((o) => o.trim()).filter(Boolean),
+                  multiple_choice: pollMultiple,
+                },
+              }
+            : {}),
         });
         id = res.id;
         if (res.status === "pending_review") {
@@ -220,7 +235,7 @@ function ComposeInner() {
           aria-label="帖子标题"
           style={{ fontSize: 16, fontWeight: 600, padding: "12px 14px" }}
         />
-        <div style={{ display: "flex", gap: 12 }}>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           <select
             className="select"
             value={category}
@@ -235,7 +250,59 @@ function ComposeInner() {
               </option>
             ))}
           </select>
+          <select
+            className="select"
+            value={postType}
+            onChange={(e) => setPostType(e.target.value)}
+            aria-label="帖子类型"
+            style={{ maxWidth: 180 }}
+          >
+            <option value="discussion">💬 讨论帖</option>
+            <option value="article">📄 长文章</option>
+            <option value="question">❓ 问答帖</option>
+            <option value="poll">📊 投票帖</option>
+          </select>
         </div>
+        {postType === "poll" && (
+          <div className="card" style={{ padding: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+              <b style={{ fontSize: 14 }}>📊 投票选项</b>
+              <label style={{ fontSize: 13, display: "flex", gap: 6, alignItems: "center", marginLeft: "auto" }}>
+                <input type="checkbox" checked={pollMultiple} onChange={(e) => setPollMultiple(e.target.checked)} />
+                允许多选
+              </label>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {pollOptions.map((opt, i) => (
+                <div key={i} style={{ display: "flex", gap: 8 }}>
+                  <input
+                    className="input"
+                    placeholder={`选项 ${i + 1}`}
+                    value={opt}
+                    maxLength={200}
+                    onChange={(e) => setPollOptions(pollOptions.map((x, j) => (j === i ? e.target.value : x)))}
+                    aria-label={`投票选项 ${i + 1}`}
+                  />
+                  {pollOptions.length > 2 && (
+                    <button
+                      type="button"
+                      className="btn btn-text"
+                      aria-label={`删除选项 ${i + 1}`}
+                      onClick={() => setPollOptions(pollOptions.filter((_, j) => j !== i))}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            {pollOptions.length < 10 && (
+              <button type="button" className="btn btn-secondary btn-sm" style={{ marginTop: 10 }} onClick={() => setPollOptions([...pollOptions, ""])}>
+                + 添加选项
+              </button>
+            )}
+          </div>
+        )}
         <div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
             {tags.map((t) => (

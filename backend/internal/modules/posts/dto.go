@@ -4,6 +4,8 @@ package posts
 import (
 	"context"
 	"time"
+
+	"github.com/yanji-community/backend/internal/modules/polls"
 )
 
 // 帖子状态。
@@ -105,13 +107,14 @@ type UsersProvider interface {
 
 // CreateRequest 创建/保存草稿请求。
 type CreateRequest struct {
-	Title        string   `json:"title"`
-	BodyMarkdown string   `json:"body_markdown"`
-	CategorySlug string   `json:"category_slug"`
-	PostType     string   `json:"post_type"`
-	TagSlugs     []string `json:"tag_slugs"`
-	Excerpt      string   `json:"excerpt"`
-	IsDraft      bool     `json:"is_draft"`
+	Title        string        `json:"title"`
+	BodyMarkdown string        `json:"body_markdown"`
+	CategorySlug string        `json:"category_slug"`
+	PostType     string        `json:"post_type"`
+	TagSlugs     []string      `json:"tag_slugs"`
+	Excerpt      string        `json:"excerpt"`
+	IsDraft      bool          `json:"is_draft"`
+	Poll         *polls.Config `json:"poll,omitempty"`
 }
 
 // UpdateRequest 编辑请求。

@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/yanji-community/backend/internal/shared/outbox"
 )
@@ -46,8 +47,8 @@ func EmitTx(ctx context.Context, tx pgx.Tx, p Payload) error {
 	return outbox.EmitTx(ctx, tx, "notification.created", p.RecipientID, p)
 }
 
-// RegisterConsumer 注册 outbox → notifications 消费者。
-func RegisterConsumer(d *outbox.Dispatcher, pool *pgxpool.Pool) {
+// RegisterConsumer 注册 outbox → notifications 消费者（rdb 可空：为空时无实时推送）。
+func RegisterConsumer(d *outbox.Dispatcher, pool *pgxpool.Pool, rdb redis.UniversalClient) {
 	d.Register("notification.created", func(ctx context.Context, aggregateID int64, raw json.RawMessage) error {
 		var p Payload
 		if err := json.Unmarshal(raw, &p); err != nil {
@@ -56,11 +57,22 @@ func RegisterConsumer(d *outbox.Dispatcher, pool *pgxpool.Pool) {
 		if p.RecipientID == 0 || p.Title == "" {
 			return errors.New("通知事件缺少 recipient/title")
 		}
-		_, err := pool.Exec(ctx, `
+		tag, err := pool.Exec(ctx, `
 			INSERT INTO notifications (recipient_id, actor_id, type, resource_type, resource_id, title, body, dedupe_key)
 			VALUES ($1, NULLIF($2, 0), $3, $4, $5, $6, $7, NULLIF($8, ''))
 			ON CONFLICT (dedupe_key) DO NOTHING`,
 			p.RecipientID, p.ActorID, p.Type, p.ResourceType, p.ResourceID, p.Title, p.Body, p.DedupeKey)
-		return err
+		if err != nil {
+			return err
+		}
+		// 先落库后推送：插入成功才发布实时事件（SSE 仅提醒，断线补拉以数据库为准）
+		if tag.RowsAffected() > 0 {
+			actor := ""
+			if p.ActorID > 0 {
+				_ = pool.QueryRow(ctx, `SELECT username FROM users WHERE id = $1`, p.ActorID).Scan(&actor)
+			}
+			PublishNotification(ctx, rdb, p.RecipientID, SSEEvent{Type: p.Type, Title: p.Title, Actor: actor})
+		}
+		return nil
 	})
 }

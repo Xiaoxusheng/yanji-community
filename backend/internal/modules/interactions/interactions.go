@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yanji-community/backend/internal/modules/notifications"
+	"github.com/yanji-community/backend/internal/modules/points"
 	"github.com/yanji-community/backend/internal/shared/apperr"
 	httpx "github.com/yanji-community/backend/internal/shared/httpx"
 	"github.com/yanji-community/backend/internal/shared/pagination"
@@ -308,12 +309,13 @@ func (r *Repo) RemoveBookmark(ctx context.Context, userID, postID int64) (bool, 
 
 // Handler 互动 HTTP 层。
 type Handler struct {
-	repo *Repo
+	repo   *Repo
+	points *points.Service
 }
 
 // NewHandler 构造。
-func NewHandler(pool *pgxpool.Pool) *Handler {
-	return &Handler{repo: NewRepo(pool)}
+func NewHandler(pool *pgxpool.Pool, pointsSvc *points.Service) *Handler {
+	return &Handler{repo: NewRepo(pool), points: pointsSvc}
 }
 
 // Register 注册互动路由。

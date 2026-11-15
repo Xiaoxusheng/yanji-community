@@ -12,6 +12,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { CardSkeleton, ErrorState } from "@/components/ui/States";
 import { CommentTree, CommentForm } from "@/components/comment/CommentTree";
 import { ReportDialog } from "@/components/report/ReportDialog";
+import { PollBox } from "@/components/poll/PollBox";
 import { useMe } from "@/lib/auth";
 import { toast } from "@/lib/toast";
 
@@ -170,6 +171,13 @@ export default function PostDetailPage() {
 
           {/* 正文（服务端已净化） */}
           <div className="prose-community" dangerouslySetInnerHTML={{ __html: p.body_rendered }} />
+
+          {p.post_type === "poll" && <PollBox postId={p.id} />}
+          {p.post_type === "question" && (
+            <div style={{ marginTop: 16, padding: "10px 14px", background: "var(--info-soft)", borderRadius: 8, fontSize: 13.5, color: "var(--info)" }}>
+              ❓ 问答帖：在下方选择一个满意的回答点击「采纳」，被采纳者将获得积分与「首答」勋章。
+            </div>
+          )}
 
           {p.tags.length > 0 && (
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 20 }}>

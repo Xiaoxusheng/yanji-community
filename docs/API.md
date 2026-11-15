@@ -115,7 +115,27 @@
 | GET/PATCH | /admin/settings | settings.manage（公开配置） |
 | GET | /admin/sanctions | user.read |
 
-## 8. 其他
+## 8. 阶段 2 接口（积分/问答/投票/活动/申诉/SSE）
+
+| Method | Path | 说明 |
+|---|---|---|
+| GET | /me/points · /me/points/transactions | 积分账户（余额/等级/签到状态）与流水 |
+| POST | /me/check-in | 每日签到（幂等，+5 分） |
+| GET | /badges · /users/{username}/badges | 勋章列表/用户勋章 |
+| POST/DELETE | /comments/{id}/accept | 采纳/取消最佳回答（提问者；每帖唯一） |
+| GET | /posts/{id}/poll · POST /posts/{id}/poll/vote | 投票结果/投票（唯一约束防重，支持改票规则） |
+| GET | /activities · /activities/{id} | 活动列表/详情 |
+| POST/DELETE | /activities/{id}/join | 报名/取消（行锁+容量检查） |
+| POST | /appeals · GET /me/appeals · GET /me/sanctions | 申诉提交/我的申诉/我的处罚（申诉入口） |
+| GET | /me/notifications/stream | SSE 实时通知（Redis Pub/Sub，先落库后推送） |
+| POST | /admin/posts/batch-moderate | 批量审核（≤50，结果明细+汇总审计） |
+| POST | /admin/users/{id}/points-adjust | 积分调整（备注必填，写流水+审计） |
+| POST | /admin/users/{id}/badges · DELETE | 授予/收回勋章 |
+| POST/PATCH/DELETE | /admin/activities[/{id}] · POST .../attend | 活动管理/标记出席（发奖励） |
+| GET | /admin/appeals · POST /admin/appeals/{id}/handle | 申诉处理（通过自动解罚） |
+| GET/POST | /admin/badges | 勋章管理 |
+
+## 9. 其他
 
 - `GET /healthz`（liveness）、`GET /readyz`（DB+Redis 就绪）、`GET /files/{key}`（本地存储静态服务）。
 - OpenAPI 规范：`docs/openapi.yaml`（阶段 1 覆盖核心资源；持续维护）。

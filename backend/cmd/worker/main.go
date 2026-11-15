@@ -57,7 +57,7 @@ func main() {
 	}
 
 	dispatcher := outbox.NewDispatcher(pool, log)
-	notifications.RegisterConsumer(dispatcher, pool)
+	notifications.RegisterConsumer(dispatcher, pool, nil) // worker 无 Redis，实时推送由 API 进程完成
 	notifications.RegisterEmailHandlers(dispatcher, mailerSvc, cfg)
 	go dispatcher.Run(ctx)
 

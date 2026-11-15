@@ -12,6 +12,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { ListSkeleton, ErrorState, EmptyState } from "@/components/ui/States";
 import { useMe } from "@/lib/auth";
 import { toast } from "@/lib/toast";
+import type { Badge } from "@/lib/types";
 
 export default function UserProfilePage() {
   const params = useParams<{ username: string }>();
@@ -42,6 +43,10 @@ export default function UserProfilePage() {
   });
 
   const isSelf = me?.authenticated && me.user?.username === username;
+  const badges = useQuery({
+    queryKey: ["profile-badges", username],
+    queryFn: () => api.get<{ items: Badge[] }>(`/users/${username}/badges`),
+  });
 
   const followUser = async () => {
     if (!profile.data) return;
@@ -136,6 +141,17 @@ export default function UserProfilePage() {
           onPageChange={setPage}
           emptyTitle="TA 还没有公开的帖子"
         />
+      )}
+      {(badges.data?.items.length ?? 0) > 0 && (
+        <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {(badges.data?.items ?? []).map((b) => (
+              <span key={b.id} className="tag tag-brand" title={b.description}>
+                {b.icon} {b.name}
+              </span>
+            ))}
+          </div>
+        </div>
       )}
       {tab === "followers" && <UserMiniList data={followers.data} loading={followers.isLoading} emptyTitle="还没有粉丝" />}
       {tab === "following" && <UserMiniList data={following.data} loading={following.isLoading} emptyTitle="还没有关注任何人" />}

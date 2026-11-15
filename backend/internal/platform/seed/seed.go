@@ -153,6 +153,42 @@ func Run(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config, logger *sl
 		ON CONFLICT DO NOTHING`, adminID); err != nil {
 		return err
 	}
+	// 等级体系
+	for _, l := range []struct {
+		lvl   int
+		name  string
+		min   int64
+		color string
+	}{
+		{0, "新用户", 0, "gray"},
+		{1, "见习", 50, "green"},
+		{2, "初级", 200, "blue"},
+		{3, "活跃", 500, "purple"},
+		{4, "资深", 1200, "orange"},
+		{5, "专家", 3000, "red"},
+		{6, "传奇", 8000, "gold"},
+	} {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO levels (level, name, min_points, color)
+			VALUES ($1, $2, $3, $4) ON CONFLICT (level) DO NOTHING`, l.lvl, l.name, l.min, l.color); err != nil {
+			return err
+		}
+	}
+	// 勋章
+	for _, b := range []struct{ code, name, desc, icon, ctype string }{
+		{"first_post", "开笔之喜", "发布第一篇帖子", "📝", "auto"},
+		{"first_answer", "解惑先锋", "回答首次被采纳为最佳答案", "✅", "auto"},
+		{"streak_7", "七日之约", "连续签到 7 天", "🔥", "auto"},
+		{"veteran", "社区元老", "由管理团队授予", "🏅", "manual"},
+		{"contributor", "杰出贡献者", "由管理团队授予", "💎", "manual"},
+	} {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO badges (code, name, description, icon, condition_type)
+			VALUES ($1, $2, $3, $4, $5) ON CONFLICT (code) DO NOTHING`,
+			b.code, b.name, b.desc, b.icon, b.ctype); err != nil {
+			return err
+		}
+	}
 	// 欢迎公告
 	var annCount int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM announcements`).Scan(&annCount); err != nil {

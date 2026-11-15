@@ -23,6 +23,7 @@ var mentionRe = regexp.MustCompile(`@([a-zA-Z0-9_]{3,20})`)
 // Comment 评论。
 type Comment struct {
 	ID           string     `json:"id"`
+	Accepted     bool       `json:"is_accepted_answer"`
 	PostID       string     `json:"post_id"`
 	ParentID     string     `json:"parent_id,omitempty"`
 	QuoteID      string     `json:"quote_id,omitempty"`
@@ -74,6 +75,7 @@ type row struct {
 	Status        string
 	LikeCount     int64
 	ReplyCount    int64
+	Accepted      bool
 	CreatedAt     time.Time
 	EditedAt      *time.Time
 }
@@ -82,7 +84,7 @@ const cols = `cm.id, cm.public_id::text, cm.post_id, cm.root_id, cm.parent_id, c
 	COALESCE(qa.username, ''), COALESCE(q.body_markdown, ''),
 	cm.depth, cm.author_id, u.public_id::text, u.username,
 	COALESCE(up.display_name, u.username), up.avatar_key,
-	cm.body_rendered, cm.status, cm.like_count, cm.reply_count, cm.created_at, cm.edited_at`
+	cm.body_rendered, cm.status, cm.like_count, cm.reply_count, cm.is_accepted_answer, cm.created_at, cm.edited_at`
 
 const joins = `FROM comments cm
 	JOIN users u ON u.id = cm.author_id AND u.deleted_at IS NULL
@@ -95,7 +97,7 @@ func (r *row) toComment(viewerID int64, postAuthorID int64) Comment {
 		ID: r.PublicID, Depth: r.Depth,
 		Author:       Author{ID: r.AuthorPID, Username: r.AuthorName, DisplayName: r.AuthorDisplay, AvatarKey: r.AuthorAvatar},
 		BodyRendered: r.BodyRendered, Status: r.Status,
-		LikeCount: r.LikeCount, ReplyCount: r.ReplyCount,
+		LikeCount: r.LikeCount, ReplyCount: r.ReplyCount, Accepted: r.Accepted,
 		CreatedAt: r.CreatedAt, EditedAt: r.EditedAt,
 	}
 	if r.ParentID != nil {
@@ -155,7 +157,7 @@ func (r *Repo) ListTree(ctx context.Context, postID int64, viewerID int64, sort 
 		if err := rows.Scan(&cm.ID, &cm.PublicID, &cm.PostID, &cm.RootID, &cm.ParentID, &cm.QuoteID,
 			&cm.QuoteAuthor, &cm.QuoteBody, &cm.Depth, &cm.AuthorID, &cm.AuthorPID, &cm.AuthorName,
 			&cm.AuthorDisplay, &cm.AuthorAvatar, &cm.BodyRendered, &cm.Status, &cm.LikeCount,
-			&cm.ReplyCount, &cm.CreatedAt, &cm.EditedAt); err != nil {
+			&cm.ReplyCount, &cm.Accepted, &cm.CreatedAt, &cm.EditedAt); err != nil {
 			return nil, 0, err
 		}
 		roots = append(roots, cm)
@@ -184,7 +186,7 @@ func (r *Repo) ListTree(ctx context.Context, postID int64, viewerID int64, sort 
 		if err := replyRows.Scan(&cm.ID, &cm.PublicID, &cm.PostID, &cm.RootID, &cm.ParentID, &cm.QuoteID,
 			&cm.QuoteAuthor, &cm.QuoteBody, &cm.Depth, &cm.AuthorID, &cm.AuthorPID, &cm.AuthorName,
 			&cm.AuthorDisplay, &cm.AuthorAvatar, &cm.BodyRendered, &cm.Status, &cm.LikeCount,
-			&cm.ReplyCount, &cm.CreatedAt, &cm.EditedAt); err != nil {
+			&cm.ReplyCount, &cm.Accepted, &cm.CreatedAt, &cm.EditedAt); err != nil {
 			return nil, 0, err
 		}
 		replies = append(replies, cm)
@@ -201,7 +203,7 @@ func (r *Repo) GetByPublicID(ctx context.Context, publicID string) (*row, error)
 		Scan(&cm.ID, &cm.PublicID, &cm.PostID, &cm.RootID, &cm.ParentID, &cm.QuoteID,
 			&cm.QuoteAuthor, &cm.QuoteBody, &cm.Depth, &cm.AuthorID, &cm.AuthorPID, &cm.AuthorName,
 			&cm.AuthorDisplay, &cm.AuthorAvatar, &cm.BodyRendered, &cm.Status, &cm.LikeCount,
-			&cm.ReplyCount, &cm.CreatedAt, &cm.EditedAt)
+			&cm.ReplyCount, &cm.Accepted, &cm.CreatedAt, &cm.EditedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperr.NotFound("评论不存在")
 	}

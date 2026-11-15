@@ -298,6 +298,23 @@ func (h *Handler) AdminList(c *gin.Context) {
 	respond.Page(c, items, pq.Page, pq.PageSize, total)
 }
 
+// BatchModerate POST /admin/posts/batch-moderate
+func (h *Handler) BatchModerate(c *gin.Context) {
+	u := httpx.CurrentUser(c)
+	viewer := StaffViewer(h.svc.deps.RBAC, u.ID)
+	var req BatchModerateInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respond.Fail(c, invalid("请求体格式不正确"))
+		return
+	}
+	results, err := h.svc.BatchModerate(c.Request.Context(), viewer, u.ID, c.GetString("request_id"), req)
+	if err != nil {
+		respond.Fail(c, err)
+		return
+	}
+	respond.OK(c, gin.H{"results": results})
+}
+
 // Moderate POST /admin/posts/:id/moderate
 func (h *Handler) Moderate(c *gin.Context) {
 	u := httpx.CurrentUser(c)

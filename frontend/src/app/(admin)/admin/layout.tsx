@@ -9,6 +9,7 @@ import {
   DashboardOutlined, UserOutlined, FileTextOutlined, CommentOutlined,
   FlagOutlined, AppstoreOutlined, TagsOutlined, NotificationOutlined,
   StopOutlined, SafetyCertificateOutlined, SettingOutlined, HistoryOutlined, ArrowLeftOutlined,
+  TrophyOutlined, CalendarOutlined, SolutionOutlined,
 } from "@ant-design/icons";
 import "@ant-design/v5-patch-for-react-19";
 import { useMe } from "@/lib/auth";
@@ -25,6 +26,9 @@ const items = [
   { key: "/admin/tags", icon: <TagsOutlined />, label: <Link href="/admin/tags">标签管理</Link> },
   { key: "/admin/announcements", icon: <NotificationOutlined />, label: <Link href="/admin/announcements">公告管理</Link> },
   { key: "/admin/sensitive-words", icon: <StopOutlined />, label: <Link href="/admin/sensitive-words">敏感词</Link> },
+  { key: "/admin/appeals", icon: <SolutionOutlined />, label: <Link href="/admin/appeals">申诉处理</Link> },
+  { key: "/admin/activities", icon: <CalendarOutlined />, label: <Link href="/admin/activities">活动管理</Link> },
+  { key: "/admin/badges", icon: <TrophyOutlined />, label: <Link href="/admin/badges">勋章管理</Link> },
   { key: "/admin/roles", icon: <SafetyCertificateOutlined />, label: <Link href="/admin/roles">角色权限</Link> },
   { key: "/admin/settings", icon: <SettingOutlined />, label: <Link href="/admin/settings">系统设置</Link> },
   { key: "/admin/logs", icon: <HistoryOutlined />, label: <Link href="/admin/logs">审计日志</Link> },

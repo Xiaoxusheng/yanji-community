@@ -89,7 +89,7 @@ func main() {
 
 	// Outbox 投递器（API 进程内嵌；独立 worker 同构部署见 cmd/worker）
 	dispatcher := outbox.NewDispatcher(pool, log)
-	notifications.RegisterConsumer(dispatcher, pool)
+	notifications.RegisterConsumer(dispatcher, pool, redisCli)
 	notifications.RegisterEmailHandlers(dispatcher, mailerSvc, cfg)
 	go dispatcher.Run(ctx)
 

@@ -10,7 +10,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/yanji-community/backend/internal/modules/activities"
 	"github.com/yanji-community/backend/internal/modules/admin"
+	"github.com/yanji-community/backend/internal/modules/appeals"
 	"github.com/yanji-community/backend/internal/modules/auth"
 	"github.com/yanji-community/backend/internal/modules/categories"
 	"github.com/yanji-community/backend/internal/modules/comments"
@@ -18,6 +20,8 @@ import (
 	"github.com/yanji-community/backend/internal/modules/interactions"
 	"github.com/yanji-community/backend/internal/modules/moderation"
 	"github.com/yanji-community/backend/internal/modules/notifications"
+	"github.com/yanji-community/backend/internal/modules/points"
+	"github.com/yanji-community/backend/internal/modules/polls"
 	"github.com/yanji-community/backend/internal/modules/posts"
 	"github.com/yanji-community/backend/internal/modules/reports"
 	"github.com/yanji-community/backend/internal/modules/search"
@@ -80,7 +84,14 @@ func Build(d Deps) *gin.Engine {
 	}
 
 	// ---- 模块装配 ----
+	ptsSvc := points.New(d.Pool, d.Logger)
+	pollSvc := polls.New(d.Pool, d.Logger)
+	actSvc := activities.New(d.Pool, ptsSvc, d.Audit, d.Logger)
+	appealSvc := appeals.New(d.Pool, moderation.NewSanctionService(d.Pool, d.Logger), d.Audit, d.Logger)
+	sanctionSvc := moderation.NewSanctionService(d.Pool, d.Logger)
+
 	authSvc := auth.New(d.Pool, d.Logger, d.Cfg.SessionTTL, d.Cfg.PublicURL)
+	authSvc.SetPoints(ptsSvc)
 	authHandler := auth.NewHandler(authSvc, d.Cfg.CookieDomain, d.Cfg.CookieSecure)
 
 	userSvc := users.New(d.Pool, d.Logger)
@@ -98,25 +109,38 @@ func Build(d Deps) *gin.Engine {
 	postSvc := posts.New(posts.Deps{
 		Pool: d.Pool, Redis: d.Redis, RBAC: d.RBAC, Cats: catSvc, Tags: tagSvc,
 		Gate: d.Gate, Audit: d.Audit, Logger: d.Logger, MaxTags: 5,
-		Follows: followSvc, Users: userSvc,
+		Follows: followSvc, Users: userSvc, Points: ptsSvc, Polls: pollSvc,
 	})
 	postHandler := posts.NewHandler(postSvc)
+
+	// 最佳回答：发布奖励后授予「首答」勋章
+	answerSvc := comments.NewAnswerService(comments.Deps2{
+		Pool: d.Pool, Points: ptsSvc, Logger: d.Logger,
+	})
+	answerHandler := comments.NewAnswerHandler(answerSvc)
 
 	commentSvc := comments.New(comments.Deps{
 		Pool: d.Pool, RBAC: d.RBAC, Gate: d.Gate, Audit: d.Audit, Logger: d.Logger, Post: postSvc,
 	})
 	commentHandler := comments.NewHandler(commentSvc)
 
-	interHandler := interactions.NewHandler(d.Pool)
+	interHandler := interactions.NewHandler(d.Pool, ptsSvc)
 
 	notifSvc := notifications.New(d.Pool, d.Logger)
 	notifHandler := notifications.NewHandler(notifSvc)
+	notifHandler.SetRedis(d.Redis)
 
 	reportSvc := reports.New(d.Pool, d.RBAC, d.Audit, d.Logger)
 	reportHandler := reports.NewHandler(reportSvc)
 
 	searchSvc := search.New(d.Pool, d.Logger)
 	searchHandler := search.NewHandler(searchSvc)
+
+	ptsHandler := points.NewHandler(ptsSvc)
+	pollHandler := polls.NewHandler(pollSvc)
+	actHandler := activities.NewHandler(actSvc)
+	appealHandler := appeals.NewHandler(appealSvc)
+	_ = sanctionSvc
 
 	adminSvc := admin.New(d.Pool, d.RBAC, moderation.NewSanctionService(d.Pool, d.Logger), d.Gate, d.Audit, d.Logger)
 	adminHandler := admin.NewHandler(adminSvc)
@@ -163,6 +187,10 @@ func Build(d Deps) *gin.Engine {
 		pub.GET("/tags/:slug/posts", postHandler.TagPosts)
 		searchHandler.Register(pub)
 		pub.GET("/announcements", adminHandler.PublicAnnouncements)
+		pub.GET("/activities", actHandler.List)
+		pub.GET("/activities/:id", actHandler.Get)
+		pub.GET("/badges", ptsHandler.Badges)
+		pub.GET("/users/:username/badges", ptsHandler.UserBadges)
 		pub.GET("/settings/public", adminHandler.PublicSettings)
 		pub.POST("/posts/:id/view", postHandler.RecordView) // 浏览计数（游客可上报）
 	}
@@ -170,6 +198,10 @@ func Build(d Deps) *gin.Engine {
 	// ---- 用户中心（需登录）----
 	userHandler.RegisterMe(api)
 	notifHandler.Register(api)
+	ptsHandler.RegisterUser(api)
+
+	// SSE 实时通知
+	api.GET("/me/notifications/stream", notifHandler.Stream)
 
 	// ---- 写入互动（需登录 + 验证邮箱 + 限流 write）----
 	write := api.Group("")
@@ -178,6 +210,10 @@ func Build(d Deps) *gin.Engine {
 		followHandler.Register(write)
 		interHandler.Register(write)
 		reportHandler.RegisterUser(write)
+		actHandler.RegisterPublic(write)
+		pollHandler.Register(write)
+		answerHandler.Register(write)
+		appealHandler.RegisterUser(write)
 
 		postsWrite := write.Group("")
 		postsWrite.Use(httpx.RequireVerified(), httpx.RequireCanPost())
@@ -231,6 +267,18 @@ func Build(d Deps) *gin.Engine {
 		annAdmin.POST("", adminHandler.CreateAnnouncement)
 		annAdmin.PATCH("/:id", adminHandler.UpdateAnnouncement)
 		annAdmin.DELETE("/:id", adminHandler.DeleteAnnouncement)
+
+		// 阶段 2：积分/勋章/活动/申诉
+		ptsAdmin := adminGroup.Group("")
+		ptsAdmin.Use(perm("user.sanction"))
+		ptsHandler.RegisterAdmin(ptsAdmin)
+		actAdmin := adminGroup.Group("/activities", perm("announcement.manage"))
+		actHandler.RegisterAdmin(actAdmin)
+		appealAdmin := adminGroup.Group("/appeals", perm("report.handle"))
+		appealHandler.RegisterAdmin(appealAdmin)
+
+		// 批量审核（上限 50，逐条校验范围并写审计）
+		adminGroup.POST("/posts/batch-moderate", perm("post.moderate"), postHandler.BatchModerate)
 
 		adminGroup.GET("/roles", perm("role.read"), adminHandler.Roles)
 		adminGroup.GET("/permissions", perm("role.read"), adminHandler.Permissions)

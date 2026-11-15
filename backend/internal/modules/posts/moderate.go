@@ -215,3 +215,46 @@ func truncate(s string, n int) string {
 	}
 	return string(r[:n]) + "…"
 }
+
+// BatchModerateInput 批量审核入参。
+type BatchModerateInput struct {
+	IDs    []string `json:"ids"`
+	Action string   `json:"action"`
+	Reason string   `json:"reason"`
+}
+
+// BatchModerate 批量管理动作：数量上限 50；逐条执行范围校验；返回逐条结果；汇总写审计。
+func (s *Service) BatchModerate(ctx context.Context, actor *Viewer, actorID int64, requestID string, in BatchModerateInput) ([]map[string]any, error) {
+	if len(in.IDs) == 0 {
+		return nil, apperr.BadRequest("VALIDATION_ERROR", "请选择要操作的帖子")
+	}
+	if len(in.IDs) > 50 {
+		return nil, apperr.BadRequest("VALIDATION_ERROR", "批量操作一次最多 50 条")
+	}
+	valid := map[string]bool{"hide": true, "restore": true, "lock": true, "unlock": true, "approve": true, "reject": true}
+	if !valid[in.Action] {
+		return nil, apperr.BadRequest("VALIDATION_ERROR", "该动作不支持批量执行")
+	}
+	if (in.Action == "reject" || in.Action == "hide") && in.Reason == "" {
+		return nil, apperr.BadRequest("VALIDATION_ERROR", "驳回/隐藏必须填写原因")
+	}
+	results := make([]map[string]any, 0, len(in.IDs))
+	succeeded := 0
+	for _, id := range in.IDs {
+		err := s.Moderate(ctx, actor, actorID, requestID, id, ModerateRequest{Action: in.Action, Reason: in.Reason})
+		if err != nil {
+			results = append(results, map[string]any{"id": id, "ok": false, "error": err.Error()})
+			continue
+		}
+		succeeded++
+		results = append(results, map[string]any{"id": id, "ok": true})
+	}
+	if succeeded > 0 {
+		s.deps.Audit.Log(ctx, moderation.Detail{
+			Action: "post.batch_" + in.Action, TargetType: "post",
+			ActorID: actorID, RequestID: requestID,
+			Note: itoa(int64(succeeded)) + "/" + itoa(int64(len(in.IDs))) + " 条成功；原因：" + in.Reason,
+		})
+	}
+	return results, nil
+}

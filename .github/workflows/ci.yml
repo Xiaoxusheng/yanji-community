@@ -69,10 +69,15 @@ jobs:
           go-version-file: backend/go.mod
           cache: true
           cache-dependency-path: backend/go.sum
-      - name: 端到端集成测试（迁移 000001-000009 + 全业务链路断言）
-        run: go test ./tests/... -tags integration -v -count=1 -timeout 8m
+      - name: 端到端集成测试（迁移 000001-000010 + 全业务链路断言）
+        run: |
+          set -o pipefail
+          go test ./tests/... -tags integration -v -count=1 -timeout 8m 2>&1 | tee /tmp/e2e.log
         env:
           TEST_DATABASE_URL: postgres://yanji:yanji_dev_password@127.0.0.1:5432/yanji_community_test?sslmode=disable
+      - name: 失败日志写入 Step Summary（公开可读）
+        if: failure()
+        run: tail -c 50000 /tmp/e2e.log >> "$GITHUB_STEP_SUMMARY"
 
   frontend:
     name: 前端 · Lint/类型/构建

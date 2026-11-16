@@ -72,6 +72,13 @@
 - 修复：gitignore 改为锚定 /data/ /uploads/；补入 upload.go（磁盘/仓库 .go 73=73 核对一致；
   迁移 SQL 与 frontend/src 文件数同样核对无遗漏）
 
+### CI 第二轮修复（进行中）
+- 后端/前端 job ✅；集成 job 首跑失败
+- 定位：中文搜索必然失败——simple 分词下中文整句是单一词素，tsv @@ 匹配不到子串
+- 修复：searchPosts 叠加 title/body trigram ILIKE 兜底 + 迁移 000010（body GIN trgm）
+- E2E：message 举报改用真实消息 ID 断言 201（原断言 convID 恰好命中消息 1 会误判）
+- CI：测试日志 tee 到 GITHUB_STEP_SUMMARY（公开 check-run API 可读，绕过需鉴权的 log 接口）
+
 ### 下一步
 1. 推送后盯 CI 集成 job（E2E 首次真实执行），修复暴露问题至全绿。
 2. 家里服务器运行 scripts/server-e2e.sh --full 做完整栈联调。

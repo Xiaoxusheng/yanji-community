@@ -463,10 +463,10 @@ func TestE2ECoreLoop(t *testing.T) {
 	apiA.do("POST", fmt.Sprintf("/conversations/%d/messages", convID), map[string]any{"body_text": "对方关闭私信后的消息"}, 403)
 	apiB.do("PATCH", "/me/settings", map[string]any{"allow_direct_messages": true}, 200)
 
-	// 30. 举报私信（target_type=message）
+	// 30. 举报私信（target_type=message，以真实消息内部 ID 为目标）
 	apiB.do("POST", "/reports", map[string]any{
-		"target_type": "message", "target_id": itoaInt(convID), "reason_code": "harassment", "description": "E2E 私信举报占位",
-	}, 400) // message 举报以内部消息 ID 为目标，此处 convID 非消息 ID → 404/400 之一；仅验证类型被接受（非 invalid target_type）
+		"target_type": "message", "target_id": itoaInt(rmsgID), "reason_code": "harassment", "description": "E2E 私信举报验证",
+	}, 201)
 }
 
 // grabToken 从 outbox 事件中提取验证令牌（模拟用户点击邮件链接）。

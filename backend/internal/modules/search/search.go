@@ -120,9 +120,12 @@ func (h *Handler) searchPosts(c *gin.Context, q string, pq pagination.Query, vie
 		order = `(p.like_count*3.0 + p.comment_count*2.0 + p.bookmark_count*4.0 + p.view_count*0.1)
 		         / POWER(EXTRACT(EPOCH FROM (now_utc() - p.published_at))/3600.0 + 2, 1.2) DESC`
 	}
+	// 中文无分词：simple 配置下整句成单一词素，必须叠加 trigram ILIKE 兜底（title/body 索引见迁移 000010）
 	where := `p.status = 'published' AND p.deleted_at IS NULL
 	          AND c.status = 'active' AND c.visibility = 'public'
-	          AND p.tsv @@ websearch_to_tsquery('simple', $1)`
+	          AND (p.tsv @@ websearch_to_tsquery('simple', $1)
+	               OR p.title ILIKE '%' || $1 || '%'
+	               OR p.body_markdown ILIKE '%' || $1 || '%')`
 	args := []any{q}
 	if cat := c.Query("category"); cat != "" {
 		args = append(args, cat)

@@ -74,12 +74,32 @@ export const api = {
     request<T>(path, { method: "POST", formData }),
 };
 
-/** 拼接文件访问地址（本地存储静态服务） */
+/** 拼接文件访问地址（本地存储静态服务），拒绝非法协议与协议相对路径 */
 export function fileURL(key: string): string | null {
   if (!key) return null;
-  if (key.startsWith("http://") || key.startsWith("https://")) return key;
+  const trimmed = key.trim();
+  if (trimmed.startsWith("//")) return null;
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    return safeExternalUrl(trimmed);
+  }
+  if (trimmed.includes("..") || /[\s<>"'\\]/.test(trimmed)) return null;
   const origin = API_BASE.replace(/\/api\/v1$/, "");
-  return `${origin}${key.startsWith("/") ? "" : "/files/"}${key.startsWith("/") ? "" : "files/"}${key}`;
+  // key 以 / 开头表示已含前缀（如 /files/xxx），直接拼；否则补 /files/ 前缀
+  return `${origin}${trimmed.startsWith("/") ? trimmed : `/files/${trimmed}`}`;
+}
+
+/** 校验外部链接仅允许 http/https 协议，防止 javascript:/data: 协议注入 */
+export function safeExternalUrl(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw.trim());
+    if (u.protocol === "http:" || u.protocol === "https:") {
+      return u.toString();
+    }
+  } catch {
+    /* 非法 URL 忽略 */
+  }
+  return null;
 }
 
 /** 相对时间格式化 */

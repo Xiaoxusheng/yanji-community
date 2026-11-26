@@ -59,19 +59,17 @@ func (s *Service) List(ctx context.Context, userID int64, pq pagination.Query, u
 	}
 	args = append(args, pq.PageSize, pq.Offset)
 	rows, err := s.pool.Query(ctx, `
-		SELECT n.id, n.type, n.resource_type, n.resource_id, COALESCE(rp.public_id::text, ''),
+		SELECT n.id, n.type, n.resource_type, n.resource_id,
+		       COALESCE(CASE n.resource_type
+		         WHEN 'post' THEN (SELECT p.public_id::text FROM posts p WHERE p.id = n.resource_id)
+		         WHEN 'comment' THEN (SELECT c.public_id::text FROM comments c WHERE c.id = n.resource_id)
+		         ELSE ''
+		       END, ''),
 		       n.title, n.body, COALESCE(a.username, ''), COALESCE(ap.avatar_key, ''),
 		       n.read_at, n.created_at
 		FROM notifications n
 		LEFT JOIN users a ON a.id = n.actor_id
 		LEFT JOIN user_profiles ap ON ap.user_id = a.id
-		LEFT JOIN LATERAL (
-			CASE n.resource_type
-				WHEN 'post' THEN (SELECT p.public_id::text FROM posts p WHERE p.id = n.resource_id)
-				WHEN 'comment' THEN (SELECT c.public_id::text FROM comments c WHERE c.id = n.resource_id)
-				ELSE NULL
-			END
-		) rp ON TRUE
 		WHERE `+where+`
 		ORDER BY n.created_at DESC
 		LIMIT $`+itoaArg(len(args)-1)+` OFFSET $`+itoaArg(len(args)), args...)

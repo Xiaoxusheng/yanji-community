@@ -9,21 +9,31 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/yanji-community/backend/internal/modules/moderation"
 	"github.com/yanji-community/backend/internal/shared/apperr"
 	httpx "github.com/yanji-community/backend/internal/shared/httpx"
+	"github.com/yanji-community/backend/internal/shared/rbac"
 	"github.com/yanji-community/backend/internal/shared/respond"
 )
 
 // Service 版块业务逻辑。
 type Service struct {
-	repo   *Repo
-	logger *slog.Logger
+	repo    *Repo
+	rbacSvc *rbac.Service
+	audit   *moderation.AuditLogger
+	logger  *slog.Logger
 }
 
 // New 构造。
 func New(pool *pgxpool.Pool, logger *slog.Logger) *Service {
 	return &Service{repo: NewRepo(pool), logger: logger}
 }
+
+// SetRBAC 注入 RBAC 服务（用于非公开版块校验及版主变更即时刷新权限缓存）。
+func (s *Service) SetRBAC(r *rbac.Service) { s.rbacSvc = r }
+
+// SetAudit 注入审计日志（版块及版主变更落盘 operation_logs）。
+func (s *Service) SetAudit(a *moderation.AuditLogger) { s.audit = a }
 
 func invalid(msg string) error { return apperr.BadRequest("VALIDATION_ERROR", msg) }
 
@@ -234,9 +244,20 @@ func (h *Handler) Get(c *gin.Context) {
 		respond.Fail(c, err)
 		return
 	}
+	u := httpx.CurrentUser(c)
+	if cat.Visibility != "public" {
+		canView := false
+		if u != nil && h.svc.rbacSvc != nil {
+			canView, _ = h.svc.rbacSvc.CanModerateCategory(c.Request.Context(), u.ID, cat.ID)
+		}
+		if !canView {
+			respond.Fail(c, apperr.NotFound("版块不存在"))
+			return
+		}
+	}
 	mods, _ := h.svc.Moderators(c.Request.Context(), cat.ID)
 	isFollowing := false
-	if u := httpx.CurrentUser(c); u != nil {
+	if u != nil {
 		isFollowing, _ = h.svc.IsFollowing(c.Request.Context(), u.ID, cat.ID)
 	}
 	respond.OK(c, gin.H{"category": cat, "moderators": mods, "is_following": isFollowing})
@@ -254,6 +275,7 @@ func (h *Handler) AdminList(c *gin.Context) {
 
 // Create POST /admin/categories
 func (h *Handler) Create(c *gin.Context) {
+	u := httpx.CurrentUser(c)
 	var req CreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respond.Fail(c, apperr.ErrValidation)
@@ -264,11 +286,18 @@ func (h *Handler) Create(c *gin.Context) {
 		respond.Fail(c, err)
 		return
 	}
+	if h.svc.audit != nil && u != nil {
+		h.svc.audit.Log(c.Request.Context(), moderation.Detail{
+			Action: "category.create", TargetType: "category", TargetID: id,
+			ActorID: u.ID, RequestID: c.GetString("request_id"), IP: c.ClientIP(), Note: req.Slug,
+		})
+	}
 	respond.Created(c, gin.H{"id": id})
 }
 
 // Update PATCH /admin/categories/:id
 func (h *Handler) Update(c *gin.Context) {
+	u := httpx.CurrentUser(c)
 	id, err := parseID(c)
 	if err != nil {
 		respond.Fail(c, err)
@@ -283,11 +312,18 @@ func (h *Handler) Update(c *gin.Context) {
 		respond.Fail(c, err)
 		return
 	}
+	if h.svc.audit != nil && u != nil {
+		h.svc.audit.Log(c.Request.Context(), moderation.Detail{
+			Action: "category.update", TargetType: "category", TargetID: id,
+			ActorID: u.ID, RequestID: c.GetString("request_id"), IP: c.ClientIP(),
+		})
+	}
 	respond.OK(c, gin.H{"message": "版块已更新"})
 }
 
 // Delete DELETE /admin/categories/:id
 func (h *Handler) Delete(c *gin.Context) {
+	u := httpx.CurrentUser(c)
 	id, err := parseID(c)
 	if err != nil {
 		respond.Fail(c, err)
@@ -296,6 +332,12 @@ func (h *Handler) Delete(c *gin.Context) {
 	if err := h.svc.Delete(c.Request.Context(), id); err != nil {
 		respond.Fail(c, err)
 		return
+	}
+	if h.svc.audit != nil && u != nil {
+		h.svc.audit.Log(c.Request.Context(), moderation.Detail{
+			Action: "category.delete", TargetType: "category", TargetID: id,
+			ActorID: u.ID, RequestID: c.GetString("request_id"), IP: c.ClientIP(),
+		})
 	}
 	respond.OK(c, gin.H{"message": "版块已删除"})
 }
@@ -317,6 +359,7 @@ func (h *Handler) Moderators(c *gin.Context) {
 
 // AddModerator POST /admin/categories/:id/moderators {username}
 func (h *Handler) AddModerator(c *gin.Context) {
+	u := httpx.CurrentUser(c)
 	id, err := parseID(c)
 	if err != nil {
 		respond.Fail(c, err)
@@ -333,11 +376,18 @@ func (h *Handler) AddModerator(c *gin.Context) {
 		respond.Fail(c, err)
 		return
 	}
+	if h.svc.audit != nil && u != nil {
+		h.svc.audit.Log(c.Request.Context(), moderation.Detail{
+			Action: "category.moderator_add", TargetType: "category", TargetID: id,
+			ActorID: u.ID, RequestID: c.GetString("request_id"), IP: c.ClientIP(), Note: req.Username,
+		})
+	}
 	respond.OK(c, gin.H{"message": "版主已添加"})
 }
 
 // RemoveModerator DELETE /admin/categories/:id/moderators/:userId
 func (h *Handler) RemoveModerator(c *gin.Context) {
+	u := httpx.CurrentUser(c)
 	id, err := parseID(c)
 	if err != nil {
 		respond.Fail(c, err)
@@ -351,6 +401,13 @@ func (h *Handler) RemoveModerator(c *gin.Context) {
 	if err := h.svc.RemoveModerator(c.Request.Context(), id, userID); err != nil {
 		respond.Fail(c, err)
 		return
+	}
+	if h.svc.audit != nil && u != nil {
+		h.svc.audit.Log(c.Request.Context(), moderation.Detail{
+			Action: "category.moderator_remove", TargetType: "category", TargetID: id,
+			ActorID: u.ID, RequestID: c.GetString("request_id"), IP: c.ClientIP(),
+			Note: "user_id=" + strconv.FormatInt(userID, 10),
+		})
 	}
 	respond.OK(c, gin.H{"message": "版主已移除"})
 }
@@ -383,7 +440,7 @@ func parseIDParam(c *gin.Context, name string) (int64, error) {
 	return id, nil
 }
 
-// AddModerator 添加版主（写审计由装配层负责）。
+// AddModerator 添加版主并立即刷新目标用户 RBAC 权限缓存。
 func (s *Service) AddModerator(ctx context.Context, categoryID int64, username string) error {
 	if _, err := s.repo.GetByID(ctx, categoryID); err != nil {
 		return err
@@ -400,10 +457,16 @@ func (s *Service) AddModerator(ctx context.Context, categoryID int64, username s
 	if err := s.repo.AddModerator(ctx, tx, categoryID, userID); err != nil {
 		return apperr.Internal(err)
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return apperr.Internal(err)
+	}
+	if s.rbacSvc != nil {
+		s.rbacSvc.Invalidate(userID)
+	}
+	return nil
 }
 
-// RemoveModerator 移除版主。
+// RemoveModerator 移除版主并立即失效目标用户 RBAC 权限缓存。
 func (s *Service) RemoveModerator(ctx context.Context, categoryID, userID int64) error {
 	tx, err := s.repo.pool.Begin(ctx)
 	if err != nil {
@@ -413,7 +476,13 @@ func (s *Service) RemoveModerator(ctx context.Context, categoryID, userID int64)
 	if err := s.repo.RemoveModerator(ctx, tx, categoryID, userID); err != nil {
 		return apperr.Internal(err)
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return apperr.Internal(err)
+	}
+	if s.rbacSvc != nil {
+		s.rbacSvc.Invalidate(userID)
+	}
+	return nil
 }
 
 // UserResolver 由路由装配注入（依赖 users 模块）。

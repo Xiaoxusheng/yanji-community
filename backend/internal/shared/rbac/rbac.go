@@ -225,7 +225,7 @@ func (s *Service) RemoveRole(ctx context.Context, tx pgx.Tx, userID, roleID int6
 // UserRoles 用户角色明细（管理后台详情用）。
 func (s *Service) UserRoles(ctx context.Context, userID int64) ([]map[string]any, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT ur.id, r.code, r.name, ur.scope_type, COALESCE(ur.scope_id, 0),
+		SELECT ur.id, ur.role_id, r.code, r.name, ur.scope_type, COALESCE(ur.scope_id, 0),
 		       COALESCE(c.name, '')
 		FROM user_roles ur
 		JOIN roles r ON r.id = ur.role_id
@@ -237,14 +237,14 @@ func (s *Service) UserRoles(ctx context.Context, userID int64) ([]map[string]any
 	defer rows.Close()
 	var out []map[string]any
 	for rows.Next() {
-		var id int64
+		var id, roleID int64
 		var code, name, scopeType, catName string
 		var scopeID int64
-		if err := rows.Scan(&id, &code, &name, &scopeType, &scopeID, &catName); err != nil {
+		if err := rows.Scan(&id, &roleID, &code, &name, &scopeType, &scopeID, &catName); err != nil {
 			return nil, err
 		}
 		out = append(out, map[string]any{
-			"id": id, "role_code": code, "role_name": name,
+			"id": id, "role_id": roleID, "role_code": code, "role_name": name,
 			"scope_type": scopeType, "scope_id": scopeID, "scope_name": catName,
 		})
 	}

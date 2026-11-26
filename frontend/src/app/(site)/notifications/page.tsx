@@ -1,20 +1,27 @@
 "use client";
 
-// 通知中心：全部/未读、类型筛选、已读、删除。
+// 通知中心：全部/未读筛选、类型过滤、一键已读与快捷跳转。
 import Link from "next/link";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, timeAgo, type PageData } from "@/lib/api";
 import type { NotificationItem } from "@/lib/types";
-import { ListSkeleton, ErrorState, EmptyState, Pagination } from "@/components/ui/States";
+import { ListSkeleton, ErrorState, EmptyState, PageHeader, Pagination } from "@/components/ui/States";
 import { AuthShell } from "@/components/auth/forms";
 import { useMe } from "@/lib/auth";
 import { toast } from "@/lib/toast";
+import { IconCheck, IconTrash } from "@/components/ui/Icons";
 
 const typeLabels: Record<string, string> = {
-  comment: "评论", reply: "回复", mention: "提及",
-  like_post: "点赞", like_comment: "点赞", follow: "关注",
-  moderation: "管理", system: "系统",
+  comment: "评论",
+  reply: "回复",
+  mention: "提及",
+  like_post: "点赞",
+  like_comment: "点赞",
+  follow: "关注",
+  message: "私信",
+  moderation: "管理",
+  system: "系统",
 };
 
 export default function NotificationsPage() {
@@ -39,7 +46,7 @@ export default function NotificationsPage() {
   if (me && !me.authenticated) {
     return (
       <AuthShell title="请先登录">
-        <p style={{ marginBottom: 16 }}>登录后查看你的通知。</p>
+        <p style={{ marginBottom: 16, color: "var(--text-2)" }}>登录后查看通知提醒。</p>
         <Link href="/login" className="btn btn-primary">去登录</Link>
       </AuthShell>
     );
@@ -48,7 +55,7 @@ export default function NotificationsPage() {
   const markAll = async () => {
     try {
       await api.post("/me/notifications/read-all");
-      toast("success", "全部已读");
+      toast("success", "已全部标记为已读");
       qc.invalidateQueries({ queryKey: ["notifications"] });
     } catch (e) {
       toast("error", (e as Error).message);
@@ -58,7 +65,9 @@ export default function NotificationsPage() {
     try {
       await api.post(`/me/notifications/${id}/read`);
       qc.invalidateQueries({ queryKey: ["notifications"] });
-    } catch { /* 静默 */ }
+    } catch {
+      /* 静默 */
+    }
   };
   const removeOne = async (id: number) => {
     try {
@@ -70,57 +79,96 @@ export default function NotificationsPage() {
   };
 
   const href = (n: NotificationItem) => {
+    if (n.type === "message") return "/messages";
     if (n.resource_type === "post" && n.resource_public_id) return `/p/${n.resource_public_id}`;
     if (n.resource_type === "comment" && n.resource_public_id) return `/p/${n.resource_public_id}`;
     return "/notifications";
   };
 
   return (
-    <div style={{ maxWidth: 720, margin: "0 auto" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-        <h1 style={{ fontSize: 20, fontWeight: 700 }}>通知中心</h1>
-        <span style={{ marginLeft: "auto" }} />
-        <button className={`btn btn-sm ${unreadOnly ? "btn-primary" : "btn-secondary"}`} onClick={() => { setUnreadOnly(!unreadOnly); setPage(1); }}>
-          {unreadOnly ? "仅未读" : "全部"}
-        </button>
-        <select className="select" style={{ width: 120, padding: "6px 10px" }} value={type} onChange={(e) => { setType(e.target.value); setPage(1); }} aria-label="通知类型">
-          <option value="">全部类型</option>
-          {Object.entries(typeLabels).map(([k, v]) => (
-            <option key={k} value={k}>{v}</option>
-          ))}
-        </select>
-        <button className="btn btn-secondary btn-sm" onClick={markAll}>
-          全部已读
-        </button>
-      </div>
+    <div style={{ maxWidth: 740, margin: "0 auto" }}>
+      <PageHeader
+        title="通知中心"
+        subtitle="新回复、赞同、私信与管理消息汇总"
+        action={
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <div className="seg-tabs">
+              <button
+                type="button"
+                className={`seg-tab ${!unreadOnly ? "is-active" : ""}`}
+                style={{ padding: "5px 10px", fontSize: 12.5 }}
+                onClick={() => {
+                  setUnreadOnly(false);
+                  setPage(1);
+                }}
+              >
+                全部
+              </button>
+              <button
+                type="button"
+                className={`seg-tab ${unreadOnly ? "is-active" : ""}`}
+                style={{ padding: "5px 10px", fontSize: 12.5 }}
+                onClick={() => {
+                  setUnreadOnly(true);
+                  setPage(1);
+                }}
+              >
+                未读
+              </button>
+            </div>
+            <select
+              className="select"
+              style={{ width: 116, padding: "6px 10px", fontSize: 13 }}
+              value={type}
+              onChange={(e) => {
+                setType(e.target.value);
+                setPage(1);
+              }}
+              aria-label="通知类型"
+            >
+              <option value="">全部类型</option>
+              {Object.entries(typeLabels).map(([k, v]) => (
+                <option key={k} value={k}>{v}</option>
+              ))}
+            </select>
+            <button className="btn btn-secondary btn-sm" onClick={markAll}>
+              全部已读
+            </button>
+          </div>
+        }
+      />
 
       {list.isLoading && <ListSkeleton />}
       {list.error && <ErrorState message={(list.error as Error).message} onRetry={() => list.refetch()} />}
       {list.data && list.data.items.length === 0 && (
-        <EmptyState title="暂无通知" description="有新评论、点赞或关注时会出现在这里" />
+        <EmptyState title="暂无通知" description="收到评论、点赞、关注或私信时会提醒你" />
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {(list.data?.items ?? []).map((n) => (
           <div
             key={n.id}
-            className="card"
+            className="card card-interactive"
             style={{
-              padding: 14,
+              padding: "14px 16px",
               display: "flex",
-              gap: 10,
+              gap: 12,
               alignItems: "flex-start",
-              borderLeft: n.read_at ? "3px solid transparent" : "3px solid var(--brand)",
-              background: n.read_at ? "var(--bg-card)" : "var(--brand-soft)",
+              borderLeft: n.read_at ? undefined : "3px solid var(--brand)",
             }}
           >
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span className="tag">{typeLabels[n.type] ?? n.type}</span>
-                <span style={{ fontSize: 12.5, color: "var(--text-3)" }}>{timeAgo(n.created_at)}</span>
-                {n.actor_name && <span style={{ fontSize: 12.5, color: "var(--text-3)" }}>来自 {n.actor_name}</span>}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                {!n.read_at && (
+                  <span style={{ width: 6, height: 6, borderRadius: 999, background: "var(--brand)" }} aria-label="未读" />
+                )}
+                <span className="tag tag-outline">{typeLabels[n.type] ?? n.type}</span>
+                <span className="tabular-nums" style={{ fontSize: 12, color: "var(--text-3)" }}>
+                  {timeAgo(n.created_at)}
+                </span>
+                {n.actor_name && <span style={{ fontSize: 12, color: "var(--text-3)" }}>· {n.actor_name}</span>}
               </div>
-              <div style={{ marginTop: 6, fontSize: 14.5, fontWeight: 500 }}>
-                {n.resource_public_id ? (
+              <div style={{ marginTop: 6, fontSize: 14.5, fontWeight: n.read_at ? 500 : 600 }}>
+                {n.resource_public_id || n.type === "message" ? (
                   <Link href={href(n)} onClick={() => !n.read_at && markOne(n.id)}>
                     {n.title}
                   </Link>
@@ -128,16 +176,16 @@ export default function NotificationsPage() {
                   n.title
                 )}
               </div>
-              {n.body && <div style={{ fontSize: 13, color: "var(--text-3)", marginTop: 2 }}>{n.body}</div>}
+              {n.body && <div style={{ fontSize: 13, color: "var(--text-2)", marginTop: 3 }}>{n.body}</div>}
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <div style={{ display: "flex", gap: 2 }}>
               {!n.read_at && (
-                <button className="btn btn-text btn-sm" onClick={() => markOne(n.id)} aria-label="标记已读">
-                  ✓
+                <button className="btn btn-icon" style={{ width: 30, height: 30 }} onClick={() => markOne(n.id)} aria-label="标记已读" title="标记已读">
+                  <IconCheck size={14} />
                 </button>
               )}
-              <button className="btn btn-text btn-sm" style={{ color: "var(--danger)" }} onClick={() => removeOne(n.id)} aria-label="删除通知">
-                ×
+              <button className="btn btn-icon" style={{ width: 30, height: 30, color: "var(--danger)" }} onClick={() => removeOne(n.id)} aria-label="删除通知" title="删除通知">
+                <IconTrash size={14} />
               </button>
             </div>
           </div>

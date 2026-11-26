@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/yanji-community/backend/internal/shared/apperr"
 	httpx "github.com/yanji-community/backend/internal/shared/httpx"
 	"github.com/yanji-community/backend/internal/shared/pagination"
 	"github.com/yanji-community/backend/internal/shared/respond"
@@ -56,6 +57,16 @@ func (h *Handler) CategoryPosts(c *gin.Context) {
 	if u := httpx.CurrentUser(c); u != nil {
 		viewerID = u.ID
 	}
+	if cat.Visibility != "public" {
+		canView := false
+		if viewerID > 0 && h.svc.deps.RBAC != nil {
+			canView, _ = h.svc.deps.RBAC.CanModerateCategory(c.Request.Context(), viewerID, cat.ID)
+		}
+		if !canView {
+			respond.Fail(c, apperr.NotFound("版块不存在"))
+			return
+		}
+	}
 	items, total, err := h.svc.ListByCategory(c.Request.Context(), cat, viewerID, c.DefaultQuery("sort", "latest"), pq.PageSize, pq.Offset)
 	if err != nil {
 		respond.Fail(c, err)
@@ -68,19 +79,23 @@ func (h *Handler) CategoryPosts(c *gin.Context) {
 func (h *Handler) RegisterPublic(rg *gin.RouterGroup) {
 	rg.GET("/feeds", h.Feeds)
 	rg.GET("/posts/:id", h.Detail)
-	rg.GET("/posts/:id/revisions", h.Revisions)
+	rg.GET("/posts/:id/revisions", httpx.RequireAuth(), h.Revisions)
 	rg.POST("/posts/:id/view", h.RecordView)
 	// 用户公开帖子（/users/:username/posts）
 	rg.GET("/users/:username/posts", h.UserPosts)
 }
 
-// RegisterAuth 认证路由。
+// RegisterAuth 发帖/编辑/发布写入路由（受邮箱验证与发帖处罚约束）。
 func (h *Handler) RegisterAuth(rg *gin.RouterGroup) {
 	rg.POST("/posts", h.Create)
 	rg.PATCH("/posts/:id", h.Update)
-	rg.DELETE("/posts/:id", h.Delete)
 	rg.POST("/posts/:id/publish", h.Publish)
-	rg.GET("/me/posts", h.MyPosts)
+}
+
+// RegisterOwn 查看自己的帖子与删帖路由（仅需登录，不受禁发帖处罚阻断）。
+func (h *Handler) RegisterOwn(rg *gin.RouterGroup) {
+	rg.GET("/me/posts", httpx.RequireAuth(), h.MyPosts)
+	rg.DELETE("/posts/:id", httpx.RequireAuth(), h.Delete)
 }
 
 // RegisterAdmin 后台路由。
@@ -233,6 +248,10 @@ func (h *Handler) Publish(c *gin.Context) {
 // Revisions GET /posts/:id/revisions
 func (h *Handler) Revisions(c *gin.Context) {
 	u := httpx.CurrentUser(c)
+	if u == nil {
+		respond.Fail(c, apperr.ErrUnauthenticated)
+		return
+	}
 	viewer := StaffViewer(h.svc.deps.RBAC, u.ID)
 	list, err := h.svc.Revisions(c.Request.Context(), viewer, u.ID, c.Param("id"))
 	if err != nil {
@@ -284,13 +303,32 @@ func (h *Handler) UserPosts(c *gin.Context) {
 
 // AdminList GET /admin/posts
 func (h *Handler) AdminList(c *gin.Context) {
+	u := httpx.CurrentUser(c)
 	pq, err := pagination.Parse(c)
 	if err != nil {
 		respond.Fail(c, err)
 		return
 	}
+	var allowedCats []int64
+	global, err := h.svc.deps.RBAC.HasGlobalPermission(c.Request.Context(), u.ID, "post.moderate")
+	if err != nil {
+		respond.Fail(c, apperr.Internal(err))
+		return
+	}
+	if !global {
+		ids, err := h.svc.deps.RBAC.ModeratedCategoryIDs(c.Request.Context(), u.ID)
+		if err != nil {
+			respond.Fail(c, apperr.Internal(err))
+			return
+		}
+		if len(ids) == 0 {
+			respond.Page(c, []PostItem{}, pq.Page, pq.PageSize, 0)
+			return
+		}
+		allowedCats = ids
+	}
 	items, total, err := h.svc.AdminList(c.Request.Context(),
-		c.Query("status"), c.Query("category"), c.Query("q"), pq.PageSize, pq.Offset)
+		c.Query("status"), c.Query("category"), c.Query("q"), allowedCats, pq.PageSize, pq.Offset)
 	if err != nil {
 		respond.Fail(c, err)
 		return

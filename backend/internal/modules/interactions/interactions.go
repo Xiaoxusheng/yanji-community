@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
@@ -89,8 +90,25 @@ type PostRef struct {
 	Title    string
 }
 
-// ResolvePost 解析帖子。
+// ResolvePost 解析公开可互动帖子（防对草稿/私有版块/隐藏帖点赞或收藏）。
 func (r *Repo) ResolvePost(ctx context.Context, publicID string) (*PostRef, error) {
+	var ref PostRef
+	err := r.pool.QueryRow(ctx, `
+		SELECT p.id, p.author_id, p.title
+		FROM posts p
+		JOIN categories c ON c.id = p.category_id
+		WHERE p.public_id = $1 AND p.deleted_at IS NULL
+		  AND p.status IN ('published', 'locked')
+		  AND c.status = 'active' AND c.visibility = 'public'`, publicID).
+		Scan(&ref.ID, &ref.AuthorID, &ref.Title)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperr.NotFound("帖子不存在")
+	}
+	return &ref, err
+}
+
+// ResolvePostForRemoval 解析帖子用于取消已有赞/收藏（允许清理已隐藏帖子的旧互动）。
+func (r *Repo) ResolvePostForRemoval(ctx context.Context, publicID string) (*PostRef, error) {
 	var ref PostRef
 	err := r.pool.QueryRow(ctx,
 		`SELECT id, author_id, title FROM posts WHERE public_id = $1 AND deleted_at IS NULL`, publicID).
@@ -101,7 +119,7 @@ func (r *Repo) ResolvePost(ctx context.Context, publicID string) (*PostRef, erro
 	return &ref, err
 }
 
-// ResolveComment 解析评论。
+// ResolveComment 解析公开评论（防对已删除/隐藏/待审评论或私有帖评论点赞）。
 type CommentRef struct {
 	ID       int64
 	AuthorID int64
@@ -109,6 +127,23 @@ type CommentRef struct {
 }
 
 func (r *Repo) ResolveComment(ctx context.Context, publicID string) (*CommentRef, error) {
+	var ref CommentRef
+	err := r.pool.QueryRow(ctx, `
+		SELECT cm.id, cm.author_id, cm.post_id
+		FROM comments cm
+		JOIN posts p ON p.id = cm.post_id
+		JOIN categories c ON c.id = p.category_id
+		WHERE cm.public_id = $1 AND cm.status = 'published'
+		  AND p.deleted_at IS NULL AND p.status IN ('published', 'locked')
+		  AND c.status = 'active' AND c.visibility = 'public'`, publicID).
+		Scan(&ref.ID, &ref.AuthorID, &ref.PostID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperr.NotFound("评论不存在")
+	}
+	return &ref, err
+}
+
+func (r *Repo) ResolveCommentForRemoval(ctx context.Context, publicID string) (*CommentRef, error) {
 	var ref CommentRef
 	err := r.pool.QueryRow(ctx,
 		`SELECT id, author_id, post_id FROM comments WHERE public_id = $1`, publicID).
@@ -205,13 +240,13 @@ func (r *Repo) DeleteFolder(ctx context.Context, userID, folderID int64) error {
 
 // BookmarkItem 收藏条目。
 type BookmarkItem struct {
-	PostID     string `json:"post_id"`
-	Title      string `json:"title"`
-	Excerpt    string `json:"excerpt"`
-	FolderID   int64  `json:"folder_id"`
-	FolderName string `json:"folder_name"`
-	AuthorName string `json:"author_name"`
-	CreatedAt  string `json:"created_at"`
+	PostID     string    `json:"post_id"`
+	Title      string    `json:"title"`
+	Excerpt    string    `json:"excerpt"`
+	FolderID   int64     `json:"folder_id"`
+	FolderName string    `json:"folder_name"`
+	AuthorName string    `json:"author_name"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // ListBookmarks 收藏列表。
@@ -226,25 +261,26 @@ func (r *Repo) ListBookmarks(ctx context.Context, userID, folderID int64, limit,
 		where += ` AND b.folder_id IS NULL`
 	}
 	var total int64
-	cnt := "SELECT COUNT(*) FROM bookmarks b WHERE " + where
+	fromVisible := `FROM bookmarks b
+		JOIN posts p ON p.id = b.post_id AND p.status IN ('published', 'locked') AND p.deleted_at IS NULL
+		JOIN categories c ON c.id = p.category_id AND c.status = 'active' AND c.visibility = 'public'`
 	if folderID < 0 {
 		// -1 表示全部
 		where = "b.user_id = $1"
-		cnt = "SELECT COUNT(*) FROM bookmarks b WHERE " + where
 		args = args[:1]
 	}
-	if err := r.pool.QueryRow(ctx, cnt, args...).Scan(&total); err != nil {
+	if err := r.pool.QueryRow(ctx, "SELECT COUNT(*) "+fromVisible+" WHERE "+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	args = append(args, limit, offset)
 	q := `SELECT p.public_id::text, p.title, p.excerpt, COALESCE(b.folder_id, 0), COALESCE(f.name, '默认收藏夹'),
 	             COALESCE(up.display_name, u.username), b.created_at
-		FROM bookmarks b
-		JOIN posts p ON p.id = b.post_id AND p.status = 'published' AND p.deleted_at IS NULL
+		` + fromVisible + `
 		JOIN users u ON u.id = p.author_id
 		JOIN user_profiles up ON up.user_id = u.id
 		LEFT JOIN bookmark_folders f ON f.id = b.folder_id
 		WHERE ` + where + `
-		ORDER BY b.created_at DESC LIMIT ` + strconv.Itoa(limit) + ` OFFSET ` + strconv.Itoa(offset)
+		ORDER BY b.created_at DESC LIMIT $` + strconv.Itoa(len(args)-1) + ` OFFSET $` + strconv.Itoa(len(args))
 	rows, err := r.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, 0, err
@@ -350,21 +386,28 @@ func (h *Handler) likePost(c *gin.Context) {
 		return
 	}
 	if inserted {
-		tx, _ := h.repo.pool.Begin(c.Request.Context())
-		_ = notifications.EmitTx(c.Request.Context(), tx, notifications.Payload{
-			RecipientID: ref.AuthorID, ActorID: u.ID, Type: notifications.TypeLikePost,
-			ResourceType: "post", ResourceID: ref.ID,
-			Title:     "有人赞了你的帖子「" + truncateT(ref.Title, 40) + "」",
-			DedupeKey: "likepost:" + strconv.FormatInt(u.ID, 10) + ":" + strconv.FormatInt(ref.ID, 10),
-		})
-		_ = tx.Commit(c.Request.Context())
+		tx, err := h.repo.pool.Begin(c.Request.Context())
+		if err == nil {
+			defer tx.Rollback(c.Request.Context())
+			_ = notifications.EmitTx(c.Request.Context(), tx, notifications.Payload{
+				RecipientID: ref.AuthorID, ActorID: u.ID, Type: notifications.TypeLikePost,
+				ResourceType: "post", ResourceID: ref.ID,
+				Title:     "有人赞了你的帖子「" + truncateT(ref.Title, 40) + "」",
+				DedupeKey: "likepost:" + strconv.FormatInt(u.ID, 10) + ":" + strconv.FormatInt(ref.ID, 10),
+			})
+			// 帖子首次获赞奖励作者积分（每帖一次，不自赞）
+			if h.points != nil && ref.AuthorID != u.ID {
+				_ = h.points.RewardFirstLike(c.Request.Context(), tx, ref.ID, ref.AuthorID)
+			}
+			_ = tx.Commit(c.Request.Context())
+		}
 	}
 	respond.OK(c, gin.H{"liked": true, "already": !inserted})
 }
 
 func (h *Handler) unlikePost(c *gin.Context) {
 	u := httpx.CurrentUser(c)
-	ref, err := h.repo.ResolvePost(c.Request.Context(), c.Param("id"))
+	ref, err := h.repo.ResolvePostForRemoval(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		respond.Fail(c, err)
 		return
@@ -390,21 +433,28 @@ func (h *Handler) likeComment(c *gin.Context) {
 		return
 	}
 	if inserted {
-		tx, _ := h.repo.pool.Begin(c.Request.Context())
-		_ = notifications.EmitTx(c.Request.Context(), tx, notifications.Payload{
-			RecipientID: ref.AuthorID, ActorID: u.ID, Type: notifications.TypeLikeComment,
-			ResourceType: "comment", ResourceID: ref.ID,
-			Title:     "有人赞了你的评论",
-			DedupeKey: "likecmt:" + strconv.FormatInt(u.ID, 10) + ":" + strconv.FormatInt(ref.ID, 10),
-		})
-		_ = tx.Commit(c.Request.Context())
+		tx, err := h.repo.pool.Begin(c.Request.Context())
+		if err == nil {
+			defer tx.Rollback(c.Request.Context())
+			_ = notifications.EmitTx(c.Request.Context(), tx, notifications.Payload{
+				RecipientID: ref.AuthorID, ActorID: u.ID, Type: notifications.TypeLikeComment,
+				ResourceType: "comment", ResourceID: ref.ID,
+				Title:     "有人赞了你的评论",
+				DedupeKey: "likecmt:" + strconv.FormatInt(u.ID, 10) + ":" + strconv.FormatInt(ref.ID, 10),
+			})
+			// 评论首次获赞奖励作者积分（每条一次，不自赞）
+			if h.points != nil && ref.AuthorID != u.ID {
+				_ = h.points.RewardFirstCommentLike(c.Request.Context(), tx, ref.ID, ref.AuthorID)
+			}
+			_ = tx.Commit(c.Request.Context())
+		}
 	}
 	respond.OK(c, gin.H{"liked": true, "already": !inserted})
 }
 
 func (h *Handler) unlikeComment(c *gin.Context) {
 	u := httpx.CurrentUser(c)
-	ref, err := h.repo.ResolveComment(c.Request.Context(), c.Param("id"))
+	ref, err := h.repo.ResolveCommentForRemoval(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		respond.Fail(c, err)
 		return
@@ -440,7 +490,7 @@ func (h *Handler) addBookmark(c *gin.Context) {
 
 func (h *Handler) removeBookmark(c *gin.Context) {
 	u := httpx.CurrentUser(c)
-	ref, err := h.repo.ResolvePost(c.Request.Context(), c.Param("id"))
+	ref, err := h.repo.ResolvePostForRemoval(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		respond.Fail(c, err)
 		return

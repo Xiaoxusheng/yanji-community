@@ -21,6 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/yanji-community/backend/internal/modules/auth"
 	"github.com/yanji-community/backend/internal/modules/moderation"
 	"github.com/yanji-community/backend/internal/modules/notifications"
 	"github.com/yanji-community/backend/internal/platform/config"
@@ -101,7 +102,24 @@ func newClient() *http.Client {
 	return &http.Client{Jar: jar, Timeout: 10 * time.Second}
 }
 
+type stubCaptcha struct{}
+
+func (stubCaptcha) Generate(context.Context) (auth.CaptchaChallenge, error) {
+	return auth.CaptchaChallenge{ID: "e2e-stub-id-000000000000000000", ImageData: "data:image/png;base64,", ExpiresIn: 300}, nil
+}
+
+func (stubCaptcha) Verify(_ context.Context, id, code string) error {
+	if id == "" || code != "E2E9" {
+		return fmt.Errorf("验证码无效")
+	}
+	return nil
+}
+
 func setup(t *testing.T) (*pgxpool.Pool, *httptest.Server, *outbox.Dispatcher) {
+	return setupWithCaptcha(t, stubCaptcha{})
+}
+
+func setupWithCaptcha(t *testing.T, capVerifier auth.CaptchaVerifier) (*pgxpool.Pool, *httptest.Server, *outbox.Dispatcher) {
 	t.Helper()
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
@@ -142,11 +160,30 @@ func setup(t *testing.T) (*pgxpool.Pool, *httptest.Server, *outbox.Dispatcher) {
 	gate := moderation.NewGate(pool)
 	engine := server.Build(server.Deps{
 		Cfg: cfg, Pool: pool, Redis: nil, Logger: log,
-		RBAC: rbacSvc, Audit: audit, Gate: gate,
+		RBAC: rbacSvc, Audit: audit, Gate: gate, Captcha: capVerifier,
 	})
 	ts := httptest.NewServer(engine)
 	t.Cleanup(ts.Close)
 	return pool, ts, dispatcher
+}
+
+func TestE2ECaptchaEnforcement(t *testing.T) {
+	_, ts, _ := setupWithCaptcha(t, nil)
+	c := &api{t: t, base: ts.URL, client: newClient()}
+	ch := c.do("GET", "/auth/captcha", nil, 200)
+	cid, _ := ch["data"].(map[string]any)["captcha_id"].(string)
+	if cid == "" {
+		t.Fatal("应返回 captcha_id")
+	}
+	// 无验证码登录被拒绝
+	c.do("POST", "/auth/login", map[string]string{"account": "admin", "password": "Admin@2024"}, 400)
+	// 错误验证码登录被拒绝并销毁原验证码
+	c.do("POST", "/auth/login", map[string]string{
+		"account": "admin", "password": "Admin@2024", "captcha_id": cid, "captcha_code": "WRONG",
+	}, 400)
+	// 访客访问需认证端点返回 401 而非 500
+	c.do("GET", "/me/profile", nil, 401)
+	c.do("GET", "/posts/any-id/revisions", nil, 401)
 }
 
 func TestE2ECoreLoop(t *testing.T) {
@@ -176,10 +213,12 @@ func TestE2ECoreLoop(t *testing.T) {
 	// 2. Alice 注册
 	apiA.do("POST", "/auth/register", map[string]string{
 		"username": "alice", "email": "alice@test.com", "password": "password123",
+		"captcha_id": "e2e-stub-id-000000000000000000", "captcha_code": "E2E9",
 	}, 201)
 	// Bob 注册
 	apiB.do("POST", "/auth/register", map[string]string{
 		"username": "bob", "email": "bob@test.com", "password": "password123",
+		"captcha_id": "e2e-stub-id-000000000000000000", "captcha_code": "E2E9",
 	}, 201)
 
 	// 3. 从 outbox 取验证 token（模拟邮件内链接）
@@ -193,12 +232,21 @@ func TestE2ECoreLoop(t *testing.T) {
 
 	// 5. 登录
 	bobPublicID := ""
-	apiA.do("POST", "/auth/login", map[string]string{"account": "alice", "password": "password123"}, 200)
-	apiB.do("POST", "/auth/login", map[string]string{"account": "bob", "password": "password123"}, 200)
+	apiA.do("POST", "/auth/login", map[string]string{
+		"account": "alice", "password": "password123",
+		"captcha_id": "e2e-stub-id-000000000000000000", "captcha_code": "E2E9",
+	}, 200)
+	apiB.do("POST", "/auth/login", map[string]string{
+		"account": "bob", "password": "password123",
+		"captcha_id": "e2e-stub-id-000000000000000000", "captcha_code": "E2E9",
+	}, 200)
 	meB := apiB.do("GET", "/auth/me", nil, 200)
 	bobPublicID = meB["data"].(map[string]any)["user"].(map[string]any)["id"].(string)
 	// 管理员登录
-	apiAdmin.do("POST", "/auth/login", map[string]string{"account": "admin", "password": "Admin@2024"}, 200)
+	apiAdmin.do("POST", "/auth/login", map[string]string{
+		"account": "admin", "password": "Admin@2024",
+		"captcha_id": "e2e-stub-id-000000000000000000", "captcha_code": "E2E9",
+	}, 200)
 
 	me := apiA.do("GET", "/auth/me", nil, 200)
 	ud := me["data"].(map[string]any)["user"].(map[string]any)
@@ -282,9 +330,16 @@ func TestE2ECoreLoop(t *testing.T) {
 	// 锁定后禁止新评论
 	apiB.do("POST", "/posts/"+postID+"/comments", map[string]any{"body_markdown": "锁定后评论"}, 409)
 
-	// 14. Alice 收到通知（评论/点赞/审核）
-	notifs := apiA.do("GET", "/me/notifications", nil, 200)
-	nItems := notifs["data"].(map[string]any)["items"].([]any)
+	// 14. Alice 收到通知（等待 Outbox 异步投递，评论/点赞/审核）
+	var nItems []any
+	for i := 0; i < 30; i++ {
+		notifs := apiA.do("GET", "/me/notifications", nil, 200)
+		nItems = notifs["data"].(map[string]any)["items"].([]any)
+		if len(nItems) > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	if len(nItems) == 0 {
 		t.Fatal("Alice 应收到通知")
 	}
@@ -330,16 +385,26 @@ func TestE2ECoreLoop(t *testing.T) {
 		t.Fatalf("重复签到不应重复加分：期望 %v 实际 %v", acct["balance"].(float64)+5, b2)
 	}
 
-	// 20. 首次点赞奖励作者积分（Bob 赞 Alice 评论文章 → Alice 积分 +1，仅一次）
-	before := apiA.do("GET", "/me/points", nil, 200)
-	beforeB := before["data"].(map[string]any)["account"].(map[string]any)["balance"].(float64)
-
-	// 21. 问答帖 + 采纳最佳回答（+20 积分 + 勋章）
+	// 20. 问答帖发布 + 首次点赞奖励作者积分（Bob 赞 Alice 问答帖 → Alice 积分 +1，仅一次）
 	q := apiA.do("POST", "/posts", map[string]any{
 		"title": "如何设计一个高并发论坛系统呢", "body_markdown": "求架构建议。",
 		"category_slug": "tech", "post_type": "question",
 	}, 201)
 	qID := q["data"].(map[string]any)["id"].(string)
+	beforePostLike := apiA.do("GET", "/me/points", nil, 200)["data"].(map[string]any)["account"].(map[string]any)["balance"].(float64)
+	apiB.do("POST", "/posts/"+qID+"/like", nil, 200)
+	afterPostLike := apiA.do("GET", "/me/points", nil, 200)["data"].(map[string]any)["account"].(map[string]any)["balance"].(float64)
+	if afterPostLike != beforePostLike+1 {
+		t.Fatalf("帖子首次点赞应奖励作者 +1 分：before=%v after=%v", beforePostLike, afterPostLike)
+	}
+	apiB.do("DELETE", "/posts/"+qID+"/like", nil, 200)
+	apiB.do("POST", "/posts/"+qID+"/like", nil, 200)
+	afterReLike := apiA.do("GET", "/me/points", nil, 200)["data"].(map[string]any)["account"].(map[string]any)["balance"].(float64)
+	if afterReLike != afterPostLike {
+		t.Fatalf("重复取消再点赞不应重复奖励：%v vs %v", afterReLike, afterPostLike)
+	}
+
+	// 21. 问答采纳最佳回答（+20 积分 + 勋章）
 	ans := apiB.do("POST", "/posts/"+qID+"/comments", map[string]any{"body_markdown": "先读写分离再上缓存。"}, 201)
 	ansID := ans["data"].(map[string]any)["id"].(string)
 	// Bob 不能采纳（只有提问者）
@@ -391,11 +456,21 @@ func TestE2ECoreLoop(t *testing.T) {
 	apiAdmin.do("POST", fmt.Sprintf("/admin/appeals/%d/handle", apID),
 		map[string]any{"accepted": true, "note": "核实为测试，予以解除"}, 200)
 	// 解除后 Bob 可评论
-	apiB.do("POST", "/posts/"+qID+"/comments", map[string]any{"body_markdown": "申诉成功后的评论"}, 200)
+	apiB.do("POST", "/posts/"+qID+"/comments", map[string]any{"body_markdown": "申诉成功后的评论"}, 201)
 
-	// 24. 首次点赞奖励仅一次：Alice 点赞 Bob 的回答 → Bob 再 +1
+	// 24. 首次点赞奖励仅一次：Alice 点赞 Bob 的回答 → Bob 再 +1，重复取消再点赞不加分
+	bobBeforeCmtLike := apiB.do("GET", "/me/points", nil, 200)["data"].(map[string]any)["account"].(map[string]any)["balance"].(float64)
 	apiA.do("POST", "/comments/"+ansID+"/like", nil, 200)
-	_ = beforeB
+	bobAfterCmtLike := apiB.do("GET", "/me/points", nil, 200)["data"].(map[string]any)["account"].(map[string]any)["balance"].(float64)
+	if bobAfterCmtLike != bobBeforeCmtLike+1 {
+		t.Fatalf("评论首次点赞应奖励回答者 +1 分：before=%v after=%v", bobBeforeCmtLike, bobAfterCmtLike)
+	}
+	apiA.do("DELETE", "/comments/"+ansID+"/like", nil, 200)
+	apiA.do("POST", "/comments/"+ansID+"/like", nil, 200)
+	bobAfterReLike := apiB.do("GET", "/me/points", nil, 200)["data"].(map[string]any)["account"].(map[string]any)["balance"].(float64)
+	if bobAfterReLike != bobAfterCmtLike {
+		t.Fatalf("重复点赞评论不应重复奖励：%v vs %v", bobAfterReLike, bobAfterCmtLike)
+	}
 
 	// ========= 阶段 3：私信 =========
 	// 25. Alice 打开与 Bob 的会话并发消息
@@ -463,10 +538,27 @@ func TestE2ECoreLoop(t *testing.T) {
 	apiA.do("POST", fmt.Sprintf("/conversations/%d/messages", convID), map[string]any{"body_text": "对方关闭私信后的消息"}, 403)
 	apiB.do("PATCH", "/me/settings", map[string]any{"allow_direct_messages": true}, 200)
 
-	// 30. 举报私信（target_type=message，以真实消息内部 ID 为目标）
+	// 30. 举报私信（target_type=message，以真实消息内部 ID 为目标，且非会话成员不可举报）
 	apiB.do("POST", "/reports", map[string]any{
 		"target_type": "message", "target_id": itoaInt(rmsgID), "reason_code": "harassment", "description": "E2E 私信举报验证",
 	}, 201)
+	apiAdmin.do("POST", "/reports", map[string]any{
+		"target_type": "message", "target_id": itoaInt(rmsgID), "reason_code": "harassment", "description": "非成员越权举报",
+	}, 404)
+
+	// 31. 个人资料私信开关回显 + 管理员重复同额调整积分累计生效
+	profB := apiB.do("GET", "/me/profile", nil, 200)
+	if profB["data"].(map[string]any)["profile"].(map[string]any)["allow_direct_messages"] != true {
+		t.Fatal("/me/profile 应返回 allow_direct_messages=true")
+	}
+	bobIDStr := itoaInt(adminFindUser(t, apiAdmin, "bob"))
+	beforeAdj := apiB.do("GET", "/me/points", nil, 200)["data"].(map[string]any)["account"].(map[string]any)["balance"].(float64)
+	apiAdmin.do("POST", "/admin/users/"+bobIDStr+"/points-adjust", map[string]any{"amount": 50, "note": "E2E 重复同额补分"}, 200)
+	apiAdmin.do("POST", "/admin/users/"+bobIDStr+"/points-adjust", map[string]any{"amount": 50, "note": "E2E 重复同额补分"}, 200)
+	afterAdj := apiB.do("GET", "/me/points", nil, 200)["data"].(map[string]any)["account"].(map[string]any)["balance"].(float64)
+	if afterAdj != beforeAdj+100 {
+		t.Fatalf("重复同额管理员补分应累计生效：before=%v after=%v", beforeAdj, afterAdj)
+	}
 }
 
 // grabToken 从 outbox 事件中提取验证令牌（模拟用户点击邮件链接）。

@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -22,17 +25,20 @@ const (
 	CtxAuthUser  = "auth_user"
 )
 
+var validRequestIDRe = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,64}$`)
+
 // AuthUser 认证后的用户上下文（由 auth 模块装配）。
 type AuthUser struct {
-	ID            int64
-	PublicID      string
-	Username      string
-	Email         string
-	EmailVerified bool
-	Status        string
-	SessionID     int64
-	SanctionType  string     // 当前生效处罚（空表示无）
-	SanctionEnds  *time.Time // 临时处罚结束时间
+	ID              int64
+	PublicID        string
+	Username        string
+	Email           string
+	EmailVerified   bool
+	Status          string
+	SessionID       int64
+	SanctionType    string     // 最高优先级生效处罚（兼容展示）
+	SanctionEnds    *time.Time // 临时处罚结束时间
+	ActiveSanctions []string   // 全部仍在生效期内的处罚类型集合（防多处罚覆盖绕过）
 }
 
 // Verified 判断账号是否已完成邮箱验证。
@@ -41,38 +47,62 @@ func (u *AuthUser) Verified() bool { return u != nil && u.EmailVerified }
 // restrictiveSanctions 限制互动的处罚类型（warn 仅提醒，不限制）。
 var restrictiveSanctions = map[string]bool{"mute": true, "post_ban": true, "temp_ban": true, "perma_ban": true}
 
-// Muted 判断账号是否处于限制互动的处罚期。
-func (u *AuthUser) Muted() bool {
-	return restrictiveSanctions[u.sanctionActive()]
+func (u *AuthUser) activeSet() map[string]bool {
+	out := map[string]bool{}
+	if u == nil {
+		return out
+	}
+	for _, s := range u.ActiveSanctions {
+		if s != "" {
+			out[s] = true
+		}
+	}
+	if u.SanctionType != "" {
+		if u.SanctionEnds == nil || !u.SanctionEnds.Before(time.Now().UTC()) {
+			out[u.SanctionType] = true
+		}
+	}
+	return out
 }
 
-// sanctionActive 返回仍在生效期的处罚类型（惰性过期）。
-func (u *AuthUser) sanctionActive() string {
-	if u == nil || u.SanctionType == "" {
-		return ""
+// IsBanned 判断账号是否处于封禁处罚（temp_ban / perma_ban）。
+func (u *AuthUser) IsBanned() bool {
+	if u == nil {
+		return false
 	}
-	if u.SanctionEnds != nil && u.SanctionEnds.Before(time.Now().UTC()) {
-		return ""
+	if u.Status == "banned" || u.Status == "suspended" {
+		return true
 	}
-	return u.SanctionType
+	set := u.activeSet()
+	return set["temp_ban"] || set["perma_ban"]
+}
+
+// Muted 判断账号是否处于限制互动的处罚期。
+func (u *AuthUser) Muted() bool {
+	for s := range u.activeSet() {
+		if restrictiveSanctions[s] {
+			return true
+		}
+	}
+	return false
 }
 
 // CanPost 是否可发帖（post_ban/temp_ban/perma_ban 期间禁止）。
 func (u *AuthUser) CanPost() bool {
-	switch u.sanctionActive() {
-	case "post_ban", "temp_ban", "perma_ban":
+	if u.IsBanned() {
 		return false
 	}
-	return true
+	set := u.activeSet()
+	return !set["post_ban"] && !set["temp_ban"] && !set["perma_ban"]
 }
 
-// CanComment 是否可评论（mute/temp_ban/perma_ban 期间禁止）。
+// CanComment 是否可评论/发私信（mute/temp_ban/perma_ban 期间禁止）。
 func (u *AuthUser) CanComment() bool {
-	switch u.sanctionActive() {
-	case "mute", "temp_ban", "perma_ban":
+	if u.IsBanned() {
 		return false
 	}
-	return true
+	set := u.activeSet()
+	return !set["mute"] && !set["temp_ban"] && !set["perma_ban"]
 }
 
 // SessionValidator 由 auth 模块实现：校验会话 Cookie 并返回用户上下文。
@@ -85,13 +115,18 @@ type PermissionChecker interface {
 	HasPermission(ctx context.Context, userID int64, code string) (bool, error)
 }
 
+// GlobalPermissionChecker 仅匹配全局作用域权限（防止单版块版主越权全局管理接口）。
+type GlobalPermissionChecker interface {
+	HasGlobalPermission(ctx context.Context, userID int64, code string) (bool, error)
+}
+
 // ---- 基础中间件 ----
 
-// RequestID 为每个请求生成/透传请求 ID。
+// RequestID 为每个请求生成/透传请求 ID（校验入参格式防止日志与响应头注入）。
 func RequestID(header string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		rid := c.GetHeader(header)
-		if rid == "" {
+		rid := strings.TrimSpace(c.GetHeader(header))
+		if !validRequestIDRe.MatchString(rid) {
 			rid = fmt.Sprintf("req_%d_%04d", time.Now().UnixNano(), time.Now().Nanosecond()%10000)
 		}
 		c.Set(CtxRequestID, rid)
@@ -139,8 +174,8 @@ func CORS(allowOrigins []string) gin.HandlerFunc {
 	}
 }
 
-// OriginCheck 对不安全方法校验 Origin 头（存在时必须属于允许来源）。
-// 浏览器跨站请求必带 Origin → 拒绝即缓解 CSRF；非浏览器客户端（curl/服务间调用）无 Origin 放行。
+// OriginCheck 对不安全方法校验 Origin / Sec-Fetch-Site 头（防 CSRF）。
+// 浏览器跨站请求必带 Origin 或 Sec-Fetch-Site=cross-site；非浏览器客户端（curl/测试）无上述头放行。
 func OriginCheck(allowOrigins []string) gin.HandlerFunc {
 	allowed := map[string]bool{}
 	for _, o := range allowOrigins {
@@ -152,8 +187,30 @@ func OriginCheck(allowOrigins []string) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		origin := c.GetHeader("Origin")
-		if origin == "" || allowed[origin] {
+		origin := strings.TrimSpace(c.GetHeader("Origin"))
+		if origin == "" {
+			// 无 Origin 时若浏览器明确声明跨站（Sec-Fetch-Site: cross-site）则拒绝
+			if strings.EqualFold(strings.TrimSpace(c.GetHeader("Sec-Fetch-Site")), "cross-site") {
+				apperr.RespondError(c, apperr.Forbidden("非法跨站请求"))
+				return
+			}
+			c.Next()
+			return
+		}
+		if allowed[origin] {
+			c.Next()
+			return
+		}
+		// 同源反代场景（如局域网 IP / 自定义端口访问）：限定 http(s) 且 Host 严格一致
+		if u, err := url.Parse(origin); err == nil &&
+			(u.Scheme == "http" || u.Scheme == "https") &&
+			u.Host != "" &&
+			strings.EqualFold(u.Host, c.Request.Host) {
+			// 若反代传递了 X-Forwarded-Proto，则协议也须一致
+			if proto := strings.TrimSpace(c.GetHeader("X-Forwarded-Proto")); proto != "" && !strings.EqualFold(proto, u.Scheme) {
+				apperr.RespondError(c, apperr.Forbidden("非法来源协议"))
+				return
+			}
 			c.Next()
 			return
 		}
@@ -167,17 +224,77 @@ func SecureHeaders() gin.HandlerFunc {
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("X-Frame-Options", "DENY")
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		c.Next()
 	}
 }
 
-// ---- 限流 ----
+// NoStore 禁止敏感接口响应被浏览器或代理缓存。
+func NoStore() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
+		c.Header("Pragma", "no-cache")
+		c.Next()
+	}
+}
 
-// RateLimit 固定窗口限流（Redis INCR + EXPIRE 60s）。
+// ---- 限流（Redis 固定窗口 Lua 原子计数 + 有界内存降级兜底） ----
+
+var rlLua = redis.NewScript(`
+local c = redis.call('INCR', KEYS[1])
+if c == 1 then
+	redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return c
+`)
+
+type memRateEntry struct {
+	count   int64
+	resetAt time.Time
+}
+
+type memRateLimiter struct {
+	mu    sync.Mutex
+	items map[string]memRateEntry
+	cap   int
+}
+
+func newMemRateLimiter(capacity int) *memRateLimiter {
+	return &memRateLimiter{items: make(map[string]memRateEntry), cap: capacity}
+}
+
+func (m *memRateLimiter) allow(key string, limit int, window time.Duration) bool {
+	now := time.Now().UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.items) >= m.cap {
+		for k, v := range m.items {
+			if now.After(v.resetAt) {
+				delete(m.items, k)
+			}
+		}
+		for len(m.items) >= m.cap {
+			for k := range m.items {
+				delete(m.items, k)
+				break
+			}
+		}
+	}
+	ent := m.items[key]
+	if now.After(ent.resetAt) {
+		ent = memRateEntry{count: 0, resetAt: now.Add(window)}
+	}
+	ent.count++
+	m.items[key] = ent
+	return ent.count <= int64(limit)
+}
+
+// RateLimit 固定窗口限流（优先 Redis Lua 原子计数，Redis 缺失或异常时自动降级有界内存限流）。
 // 维度：登录用户按 user，匿名按 IP。limit <= 0 表示不限。
 func RateLimit(rdb *redis.Client, bucket string, limit int) gin.HandlerFunc {
+	fallback := newMemRateLimiter(10000)
 	return func(c *gin.Context) {
-		if limit <= 0 || rdb == nil {
+		if limit <= 0 {
 			c.Next()
 			return
 		}
@@ -186,15 +303,19 @@ func RateLimit(rdb *redis.Client, bucket string, limit int) gin.HandlerFunc {
 			subject = fmt.Sprintf("u%d", u.ID)
 		}
 		key := fmt.Sprintf("rl:%s:%s", bucket, subject)
-		ctx := c.Request.Context()
-		var count int64
-		pipe := rdb.TxPipeline()
-		incr := pipe.Incr(ctx, key)
-		pipe.Expire(ctx, key, time.Minute)
-		if _, err := pipe.Exec(ctx); err == nil {
-			count = incr.Val()
+		if rdb != nil {
+			res, err := rlLua.Run(c.Request.Context(), rdb, []string{key}, 60).Int64()
+			if err == nil {
+				if res > int64(limit) {
+					apperr.RespondTooMany(c)
+					return
+				}
+				c.Next()
+				return
+			}
 		}
-		if count > int64(limit) {
+		// Redis 未连接或临时故障时走有界内存兜底，杜绝 fail-open
+		if !fallback.allow(key, limit, time.Minute) {
 			apperr.RespondTooMany(c)
 			return
 		}
@@ -225,7 +346,7 @@ func SessionAuth(v SessionValidator, cookieName string) gin.HandlerFunc {
 	}
 }
 
-// RequireAuth 强制认证；封禁/处罚账号拒绝互动。
+// RequireAuth 强制认证；封禁（含 temp_ban/perma_ban）账号拒绝访问。
 func RequireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		u := CurrentUser(c)
@@ -233,7 +354,7 @@ func RequireAuth() gin.HandlerFunc {
 			apperr.RespondError(c, apperr.ErrUnauthenticated)
 			return
 		}
-		if u.Status == "banned" || u.Status == "suspended" {
+		if u.IsBanned() {
 			apperr.RespondError(c, apperr.ErrAccountSuspended)
 			return
 		}
@@ -247,6 +368,10 @@ func RequireVerified() gin.HandlerFunc {
 		u := CurrentUser(c)
 		if u == nil {
 			apperr.RespondError(c, apperr.ErrUnauthenticated)
+			return
+		}
+		if u.IsBanned() {
+			apperr.RespondError(c, apperr.ErrAccountSuspended)
 			return
 		}
 		if !u.Verified() {
@@ -273,7 +398,7 @@ func RequireCanPost() gin.HandlerFunc {
 	}
 }
 
-// RequireCanComment 评论前处罚检查（mute/temp_ban/perma_ban 拒绝）。
+// RequireCanComment 评论/私信前处罚检查（mute/temp_ban/perma_ban 拒绝）。
 func RequireCanComment() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		u := CurrentUser(c)
@@ -289,7 +414,7 @@ func RequireCanComment() gin.HandlerFunc {
 	}
 }
 
-// RequirePermission 强制指定权限点。
+// RequirePermission 强制指定权限点（含版块范围角色，需要对象级范围校验的接口由 service 二次校验）。
 func RequirePermission(pc PermissionChecker, code string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		u := CurrentUser(c)
@@ -297,11 +422,36 @@ func RequirePermission(pc PermissionChecker, code string) gin.HandlerFunc {
 			apperr.RespondError(c, apperr.ErrUnauthenticated)
 			return
 		}
-		if u.Status == "banned" || u.Status == "suspended" {
+		if u.IsBanned() {
 			apperr.RespondError(c, apperr.ErrAccountSuspended)
 			return
 		}
 		ok, err := pc.HasPermission(c.Request.Context(), u.ID, code)
+		if err != nil {
+			apperr.RespondError(c, apperr.Internal(err))
+			return
+		}
+		if !ok {
+			apperr.RespondError(c, apperr.ErrForbidden)
+			return
+		}
+		c.Next()
+	}
+}
+
+// RequireGlobalPermission 强制要求全局作用域权限点（禁止单版块版主越权全局接口）。
+func RequireGlobalPermission(pc GlobalPermissionChecker, code string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		u := CurrentUser(c)
+		if u == nil {
+			apperr.RespondError(c, apperr.ErrUnauthenticated)
+			return
+		}
+		if u.IsBanned() {
+			apperr.RespondError(c, apperr.ErrAccountSuspended)
+			return
+		}
+		ok, err := pc.HasGlobalPermission(c.Request.Context(), u.ID, code)
 		if err != nil {
 			apperr.RespondError(c, apperr.Internal(err))
 			return

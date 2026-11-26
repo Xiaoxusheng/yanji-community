@@ -66,31 +66,56 @@ func (g *Gate) load(ctx context.Context) error {
 	return nil
 }
 
+var zeroWidthReplacer = strings.NewReplacer(
+	"\u200b", "", "\u200c", "", "\u200d", "", "\ufeff", "", "\u00ad", "",
+)
+
+// NormalizeForCheck 规范化待检测文本：去除零宽字符与常见 Markdown 强调符，防止插入干扰符绕过敏感词检测。
+func NormalizeForCheck(text string) string {
+	s := zeroWidthReplacer.Replace(strings.ToLower(text))
+	return s
+}
+
+func stripMarkdownEmphasis(s string) string {
+	return strings.NewReplacer("**", "", "__", "", "~~", "", "`", "").Replace(s)
+}
+
+// MatchWords 对给定词库执行敏感词检查（纯函数，便于单元测试）。
+func MatchWords(words []Word, text string) string {
+	norm := NormalizeForCheck(text)
+	stripped := stripMarkdownEmphasis(norm)
+	action := ""
+	for _, w := range words {
+		if !w.IsEnabled || strings.TrimSpace(w.Word) == "" {
+			continue
+		}
+		target := NormalizeForCheck(w.Word)
+		var hit bool
+		if w.MatchType == "exact" {
+			hit = strings.TrimSpace(norm) == target || strings.TrimSpace(stripped) == target
+		} else {
+			hit = strings.Contains(norm, target) || strings.Contains(stripped, target)
+		}
+		if !hit {
+			continue
+		}
+		if w.Action == "block" {
+			return "block" // block 优先级最高，直接短路
+		}
+		action = "review"
+	}
+	return action
+}
+
 // Check 检查文本：返回 ""（通过）/ "block"（拒绝）/ "review"（转审核）。
 func (g *Gate) Check(ctx context.Context, text string) (string, error) {
 	if err := g.load(ctx); err != nil {
 		return "", err
 	}
 	g.mu.RLock()
-	defer g.mu.RUnlock()
-	lower := strings.ToLower(text)
-	action := ""
-	for _, w := range g.words {
-		var hit bool
-		if w.MatchType == "exact" {
-			hit = strings.TrimSpace(lower) == strings.ToLower(w.Word)
-		} else {
-			hit = strings.Contains(lower, strings.ToLower(w.Word))
-		}
-		if !hit {
-			continue
-		}
-		if w.Action == "block" {
-			return "block", nil // block 优先级最高，直接短路
-		}
-		action = "review"
-	}
-	return action, nil
+	words := g.words
+	g.mu.RUnlock()
+	return MatchWords(words, text), nil
 }
 
 // Invalidate 清空敏感词缓存（后台修改后调用）。
@@ -202,16 +227,16 @@ func (s *SanctionService) ListAll(ctx context.Context, limit, offset int) ([]map
 	defer rows.Close()
 	var out []map[string]any
 	for rows.Next() {
-		var id, opIgnore int64
+		var id int64
 		var username, stype, reason, status, operator string
-		var startsAt time.Time
+		var startsAt, createdAt time.Time
 		var endsAt, lifted *time.Time
-		if err := rows.Scan(&id, &username, &stype, &reason, &startsAt, &endsAt, &status, &operator, &opIgnore, &lifted); err != nil {
+		if err := rows.Scan(&id, &username, &stype, &reason, &startsAt, &endsAt, &status, &operator, &createdAt, &lifted); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, map[string]any{
 			"id": id, "username": username, "sanction_type": stype, "reason": reason,
-			"starts_at": startsAt, "ends_at": endsAt, "status": status, "operator": operator, "lifted_at": lifted,
+			"starts_at": startsAt, "ends_at": endsAt, "status": status, "operator": operator, "created_at": createdAt, "lifted_at": lifted,
 		})
 	}
 	return out, total, rows.Err()
@@ -254,7 +279,7 @@ func (a *AuditLogger) Log(ctx context.Context, d Detail) {
 	_, err := a.pool.Exec(ctx, `
 		INSERT INTO operation_logs (actor_id, action, target_type, target_id, request_id, detail, ip_address)
 		VALUES (NULLIF($1,0), $2, $3, NULLIF($4,0), $5,
-		        jsonb_build_object('note', $6), $7)`,
+		        jsonb_build_object('note', $6::text), $7)`,
 		d.ActorID, d.Action, d.TargetType, d.TargetID, d.RequestID, d.Note, d.IP)
 	if err != nil {
 		a.logger.Error("审计日志写入失败", "action", d.Action, "err", err)
@@ -265,7 +290,7 @@ func (a *AuditLogger) Log(ctx context.Context, d Detail) {
 func (a *AuditLogger) LogInTx(ctx context.Context, tx pgx.Tx, d Detail) {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO operation_logs (actor_id, action, target_type, target_id, request_id, detail, ip_address)
-		VALUES (NULLIF($1,0), $2, $3, NULLIF($4,0), $5, jsonb_build_object('note', $6), $7)`,
+		VALUES (NULLIF($1,0), $2, $3, NULLIF($4,0), $5, jsonb_build_object('note', $6::text), $7)`,
 		d.ActorID, d.Action, d.TargetType, d.TargetID, d.RequestID, d.Note, d.IP)
 	if err != nil {
 		a.logger.Error("审计日志写入失败(tx)", "action", d.Action, "err", err)

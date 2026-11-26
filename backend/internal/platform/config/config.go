@@ -115,8 +115,8 @@ func Load() (*Config, error) {
 		cfg.CORSAllowOrigins = append(cfg.CORSAllowOrigins, "http://localhost:3000", "http://127.0.0.1:3000")
 	}
 
-	if cfg.Env == "production" {
-		cfg.CookieSecure = true // 生产环境强制 Secure Cookie
+	if cfg.Env == "production" && strings.TrimSpace(os.Getenv("COOKIE_SECURE")) == "" {
+		cfg.CookieSecure = true // 生产环境默认强制 Secure Cookie（纯 HTTP IP 部署可显式配置 COOKIE_SECURE=false）
 	}
 	if cfg.SeedAdminEmail == "" {
 		cfg.SeedAdminEmail = "admin@example.com"

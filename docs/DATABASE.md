@@ -86,7 +86,7 @@
 - appeals（部分唯一索引：同对象同用户仅一条 pending；最佳答案：`comments(post_id) WHERE is_accepted_answer` 部分唯一索引）
 ### 第三阶段（迁移 000009 已实现）
 - conversations（**pair_key 唯一**：1:1 会话去重）、conversation_members（成员唯一 + last_read_message_id/muted/pinned）
-- messages（正文 CHECK ≤5000、reply_to 引用、status sent/recalled、(conversation, created_at DESC) 索引）
+- messages（正文 CHECK ≤5000 且 `sent` 非空/`recalled` 允许清空（迁移 000011）、reply_to 引用、status sent/recalled、(conversation, created_at DESC) 索引）
 - message_attachments（图片消息，mime CHECK 白名单）
 - user_profiles.allow_direct_messages（私信开关，默认 TRUE）
 - 举报/通知类型扩展 message

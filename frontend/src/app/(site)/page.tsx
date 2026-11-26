@@ -1,13 +1,15 @@
 "use client";
 
-// 首页：推荐/最新/热门/精华/关注 Tab 信息流 + 公告 + 热门标签/版块侧栏。
+// 首页：精致社区导览条 + 信息流 + 实时积分签到/公告/热签/版块侧栏（自适应折叠）。
 import Link from "next/link";
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api, timeAgo, type PageData } from "@/lib/api";
-import type { PostItem, Announcement, Tag, Category } from "@/lib/types";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, fmtCount, timeAgo, type PageData } from "@/lib/api";
+import type { PostItem, Announcement, Tag, Category, PointAccount } from "@/lib/types";
 import { PostList } from "@/components/post/PostCard";
 import { useMe } from "@/lib/auth";
+import { toast } from "@/lib/toast";
+import { IconAward, IconCheck, IconGrid, IconHash, IconPlus } from "@/components/ui/Icons";
 
 const tabs = [
   { key: "recommended", label: "推荐" },
@@ -20,6 +22,8 @@ const tabs = [
 export default function HomePage() {
   const [tab, setTab] = useState("recommended");
   const [page, setPage] = useState(1);
+  const [checkingIn, setCheckingIn] = useState(false);
+  const qc = useQueryClient();
   const { data: me } = useMe();
   const isFollowingTab = tab === "following";
 
@@ -35,7 +39,7 @@ export default function HomePage() {
   });
   const hotTags = useQuery({
     queryKey: ["tags", "hot"],
-    queryFn: () => api.get<PageData<Tag>>("/tags?page_size=10"),
+    queryFn: () => api.get<PageData<Tag>>("/tags?page_size=12"),
     staleTime: 5 * 60_000,
   });
   const categories = useQuery({
@@ -43,120 +47,314 @@ export default function HomePage() {
     queryFn: () => api.get<{ items: Category[] }>("/categories"),
     staleTime: 5 * 60_000,
   });
+  const pointsAcc = useQuery({
+    enabled: !!me?.authenticated,
+    queryKey: ["points", "account"],
+    queryFn: () => api.get<{ account: PointAccount }>("/me/points"),
+    staleTime: 60_000,
+  });
+
+  const checkIn = async () => {
+    setCheckingIn(true);
+    try {
+      const res = await api.post<{ awarded: number; already: boolean; message: string }>("/me/check-in");
+      if (res.already) toast("info", res.message);
+      else toast("success", `签到成功 +${res.awarded} 积分`);
+      qc.invalidateQueries({ queryKey: ["points"] });
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setCheckingIn(false);
+    }
+  };
+
+  const acc = pointsAcc.data?.account;
+  const topCats = (categories.data?.items ?? []).slice(0, 5);
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 300px", gap: 24, alignItems: "start" }}>
-      <div>
-        {/* Tab 切换 */}
-        <div className="card" style={{ padding: "4px 8px", marginBottom: 14, display: "flex", gap: 2 }} role="tablist" aria-label="信息流切换">
-          {tabs.map((t) => (
-            <button
-              key={t.key}
-              role="tab"
-              aria-selected={tab === t.key}
-              className={`btn btn-text ${tab === t.key ? "" : ""}`}
-              onClick={() => {
-                setTab(t.key);
-                setPage(1);
-              }}
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* 顶部克制编辑风导览横幅 */}
+      <section className="surface-hero" style={{ padding: "20px 24px" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 16,
+            flexWrap: "wrap",
+          }}
+        >
+          <div style={{ maxWidth: 620 }}>
+            <div
               style={{
-                fontWeight: tab === t.key ? 700 : 400,
-                color: tab === t.key ? "var(--brand)" : "var(--text-2)",
-                borderBottom: tab === t.key ? "2px solid var(--brand)" : "2px solid transparent",
-                borderRadius: 0,
+                fontSize: 11.5,
+                fontWeight: 650,
+                letterSpacing: "0.08em",
+                textTransform: "uppercase",
+                color: "var(--brand)",
+                marginBottom: 4,
               }}
             >
-              {t.label}
-            </button>
-          ))}
-        </div>
-
-        {isFollowingTab && !me?.authenticated ? (
-          <div className="card" style={{ padding: "40px 24px", textAlign: "center" }}>
-            <div style={{ fontSize: 36, marginBottom: 8 }}>👀</div>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>登录后查看关注动态</div>
-            <p style={{ color: "var(--text-3)", fontSize: 14, marginBottom: 16 }}>
-              关注你感兴趣的用户、版块和标签，在这里看到他们的最新内容
+              YANJI COMMUNITY
+            </div>
+            <h1 style={{ fontSize: 22, fontWeight: 740, letterSpacing: "-0.025em", lineHeight: 1.3, margin: 0 }}>
+              {me?.authenticated && me.user
+                ? `欢迎回来，${me.user.username}`
+                : "理性交流、深度思考与高价值内容沉淀"}
+            </h1>
+            <p style={{ fontSize: 13.5, color: "var(--text-2)", margin: "6px 0 0", lineHeight: 1.55 }}>
+              涵盖技术研讨、长文专栏、问答采纳、社区投票与线下活动。在这里与同频的思考者展开对话。
             </p>
-            <Link href="/login" className="btn btn-primary btn-sm">
-              去登录
+          </div>
+          <div style={{ display: "flex", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
+            <Link href={me?.authenticated ? "/compose" : "/register"} className="btn btn-brand btn-sm">
+              <IconPlus size={14} />
+              <span>{me?.authenticated ? "发起新话题" : "免费加入社区"}</span>
+            </Link>
+            <Link href="/categories" className="btn btn-secondary btn-sm">
+              浏览全部版块
             </Link>
           </div>
-        ) : (
-          <PostList
-            posts={feed.data?.items}
-            loading={feed.isLoading}
-            error={feed.error as Error | null}
-            onRetry={() => feed.refetch()}
-            page={page}
-            pageSize={20}
-            total={feed.data?.total ?? 0}
-            onPageChange={setPage}
-            emptyTitle={isFollowingTab ? "关注的内容还很少" : "暂无内容"}
-            emptyDesc={isFollowingTab ? "去关注一些用户、版块或标签吧" : "成为第一个发帖的人吧"}
-          />
-        )}
-      </div>
+        </div>
 
-      {/* 侧栏 */}
-      <aside style={{ display: "flex", flexDirection: "column", gap: 16, position: "sticky", top: 72 }}>
-        <section className="card" style={{ padding: 16 }}>
-          <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>📢 公告</h3>
-          {announcements.isLoading ? (
-            <div className="skeleton" style={{ height: 40 }} />
-          ) : (announcements.data?.items.length ?? 0) === 0 ? (
-            <div style={{ color: "var(--text-3)", fontSize: 13 }}>暂无公告</div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {announcements.data!.items.slice(0, 3).map((a) => (
-                <div key={a.id}>
-                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>{a.title}</div>
-                  <div style={{ fontSize: 12.5, color: "var(--text-3)", marginTop: 2, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-                    {a.body}
-                  </div>
-                  <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 2 }}>{timeAgo(a.published_at)}</div>
-                </div>
+        {topCats.length > 0 && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 7,
+              marginTop: 15,
+              paddingTop: 13,
+              borderTop: "1px solid var(--border)",
+              flexWrap: "wrap",
+            }}
+          >
+            <span style={{ fontSize: 12, color: "var(--text-3)", fontWeight: 550 }}>精选版块：</span>
+            {topCats.map((c) => (
+              <Link key={c.id} href={`/c/${c.slug}`} className="tag tag-outline" style={{ background: "var(--bg-card)" }}>
+                <span>{c.name}</span>
+                <span className="tabular-nums" style={{ color: "var(--text-3)", fontSize: 11 }}>
+                  {fmtCount(c.post_count)}
+                </span>
+              </Link>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <div className="layout-main-rail">
+        <div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 10,
+              marginBottom: 14,
+              flexWrap: "wrap",
+            }}
+          >
+            <div className="seg-tabs" role="tablist" aria-label="信息流切换" style={{ overflowX: "auto", maxWidth: "100%" }}>
+              {tabs.map((t) => (
+                <button
+                  key={t.key}
+                  role="tab"
+                  aria-selected={tab === t.key}
+                  className="seg-tab"
+                  onClick={() => {
+                    setTab(t.key);
+                    setPage(1);
+                  }}
+                >
+                  {t.label}
+                </button>
               ))}
             </div>
-          )}
-        </section>
-
-        <section className="card" style={{ padding: 16 }}>
-          <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>🔥 热门标签</h3>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {(hotTags.data?.items ?? []).map((t) => (
-              <Link key={t.id} href={`/t/${t.slug}`} className="tag">
-                # {t.name}
-              </Link>
-            ))}
-            {(hotTags.data?.items.length ?? 0) === 0 && !hotTags.isLoading && (
-              <span style={{ color: "var(--text-3)", fontSize: 13 }}>暂无标签</span>
+            {feed.data && (
+              <span className="tabular-nums hide-mobile" style={{ fontSize: 12.5, color: "var(--text-3)" }}>
+                共 {fmtCount(feed.data.total)} 篇内容
+              </span>
             )}
           </div>
-        </section>
 
-        <section className="card" style={{ padding: 16 }}>
-          <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>📚 版块导航</h3>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {(categories.data?.items ?? []).slice(0, 6).map((c) => (
-              <Link key={c.id} href={`/c/${c.slug}`} style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5 }}>
-                <span>{c.name}</span>
-                <span style={{ color: "var(--text-3)" }}>{c.post_count} 帖</span>
+          {isFollowingTab && !me?.authenticated ? (
+            <div className="card" style={{ padding: "52px 24px", textAlign: "center" }}>
+              <div style={{ fontWeight: 680, fontSize: 16, marginBottom: 6 }}>登录后查看关注动态</div>
+              <p style={{ color: "var(--text-3)", fontSize: 13.5, marginBottom: 18 }}>
+                关注感兴趣的成员、版块与标签，你的专属信息流将汇总在这里。
+              </p>
+              <Link href="/login" className="btn btn-primary btn-sm">
+                立即登录
               </Link>
-            ))}
-          </div>
-          <Link href="/categories" style={{ fontSize: 13, color: "var(--brand)", marginTop: 10, display: "inline-block" }}>
-            查看全部版块 →
-          </Link>
-        </section>
+            </div>
+          ) : (
+            <PostList
+              posts={feed.data?.items}
+              loading={feed.isLoading}
+              error={feed.error as Error | null}
+              onRetry={() => feed.refetch()}
+              page={page}
+              pageSize={20}
+              total={feed.data?.total ?? 0}
+              onPageChange={setPage}
+              emptyTitle={isFollowingTab ? "关注的动态还很少" : "还没有内容"}
+              emptyDesc={isFollowingTab ? "去关注一些活跃成员、版块或标签吧" : "发表第一篇讨论开启话题"}
+            />
+          )}
+        </div>
 
-        <section className="card" style={{ padding: 16, background: "var(--brand-soft)", border: "none" }}>
-          <div style={{ fontWeight: 700, marginBottom: 6 }}>问答 · 投票 · 活动（规划中）</div>
-          <p style={{ fontSize: 13, color: "var(--text-2)", margin: 0 }}>
-            问答、投票、积分与活动功能正在规划中，敬请期待。
-          </p>
-        </section>
-      </aside>
+        <aside className="sticky-rail">
+          {me?.authenticated ? (
+            <section className="surface-spotlight" style={{ padding: 18 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <span style={{ fontSize: 13.5, fontWeight: 680, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <IconAward size={15} style={{ color: "var(--brand)" }} /> 每日签到
+                </span>
+                {acc && (
+                  <Link href="/me/points" className="tabular-nums" style={{ fontSize: 12.5, color: "var(--brand)", fontWeight: 600 }}>
+                    {acc.balance} 积分 →
+                  </Link>
+                )}
+              </div>
+              {acc ? (
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+                    <div className="stat-tile">
+                      <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text-1)" }}>
+                        Lv.{acc.level.level}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 2 }}>{acc.level.name}</div>
+                    </div>
+                    <div className="stat-tile">
+                      <div className="tabular-nums" style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text-1)" }}>
+                        {acc.streak_days} 天
+                      </div>
+                      <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 2 }}>连续签到</div>
+                    </div>
+                  </div>
+                  <button
+                    className={`btn btn-sm ${acc.today_signed ? "btn-secondary" : "btn-brand"}`}
+                    style={{ width: "100%" }}
+                    disabled={checkingIn || acc.today_signed}
+                    onClick={checkIn}
+                  >
+                    {acc.today_signed ? (
+                      <>
+                        <IconCheck size={14} /> 今日已签到
+                      </>
+                    ) : checkingIn ? (
+                      "签到中…"
+                    ) : (
+                      "立即签到 +5 积分"
+                    )}
+                  </button>
+                </>
+              ) : (
+                <div className="skeleton" style={{ height: 74 }} />
+              )}
+            </section>
+          ) : (
+            <section className="surface-spotlight" style={{ padding: 18 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, letterSpacing: "-0.015em", marginBottom: 6 }}>
+                加入研记社区
+              </div>
+              <p style={{ fontSize: 13, color: "var(--text-2)", lineHeight: 1.62, margin: "0 0 14px" }}>
+                参与深度讨论、问答采纳、社区投票，记录并沉淀你的每一次思考。
+              </p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <Link href="/register" className="btn btn-brand btn-sm" style={{ flex: 1 }}>
+                  注册账号
+                </Link>
+                <Link href="/login" className="btn btn-secondary btn-sm" style={{ flex: 1 }}>
+                  登录
+                </Link>
+              </div>
+            </section>
+          )}
+
+          <section className="card" style={{ padding: 18 }}>
+            <h3 style={{ fontSize: 13.5, fontWeight: 680, marginBottom: 12, color: "var(--text-1)", display: "flex", alignItems: "center", gap: 7 }}>
+              <span style={{ width: 6, height: 6, borderRadius: 999, background: "var(--brand)" }} aria-hidden />
+              站点公告
+            </h3>
+            {announcements.isLoading ? (
+              <div className="skeleton" style={{ height: 48 }} />
+            ) : (announcements.data?.items.length ?? 0) === 0 ? (
+              <div style={{ color: "var(--text-3)", fontSize: 13 }}>暂无新公告</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
+                {announcements.data!.items.slice(0, 3).map((a, idx, arr) => (
+                  <div
+                    key={a.id}
+                    style={{
+                      paddingBottom: idx < arr.length - 1 ? 10 : 0,
+                      borderBottom: idx < arr.length - 1 ? "1px solid var(--border)" : "none",
+                    }}
+                  >
+                    <div style={{ fontSize: 13.5, fontWeight: 600, lineHeight: 1.4 }}>{a.title}</div>
+                    {a.body && (
+                      <div
+                        style={{
+                          fontSize: 12.5,
+                          color: "var(--text-2)",
+                          marginTop: 3,
+                          lineHeight: 1.55,
+                          display: "-webkit-box",
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: "vertical",
+                          overflow: "hidden",
+                        }}
+                      >
+                        {a.body}
+                      </div>
+                    )}
+                    <div className="tabular-nums" style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 4 }}>
+                      {timeAgo(a.published_at)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="card" style={{ padding: 18 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+              <h3 style={{ fontSize: 13.5, fontWeight: 680, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <IconGrid size={14} style={{ color: "var(--text-3)" }} /> 活跃版块
+              </h3>
+              <Link href="/categories" style={{ fontSize: 12.5, color: "var(--brand)", fontWeight: 550 }}>
+                全部 →
+              </Link>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+              {(categories.data?.items ?? []).slice(0, 6).map((c) => (
+                <Link key={c.id} href={`/c/${c.slug}`} className="rail-link">
+                  <span style={{ fontWeight: 550 }}>{c.name}</span>
+                  <span className="tag tabular-nums" style={{ fontSize: 11.5, padding: "1px 8px" }}>
+                    {fmtCount(c.post_count)}
+                  </span>
+                </Link>
+              ))}
+            </div>
+          </section>
+
+          <section className="card" style={{ padding: 18 }}>
+            <h3 style={{ fontSize: 13.5, fontWeight: 680, marginBottom: 11, display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <IconHash size={14} style={{ color: "var(--text-3)" }} /> 热门标签
+            </h3>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {(hotTags.data?.items ?? []).map((t) => (
+                <Link key={t.id} href={`/t/${t.slug}`} className="tag">
+                  # {t.name}
+                </Link>
+              ))}
+              {(hotTags.data?.items.length ?? 0) === 0 && !hotTags.isLoading && (
+                <span style={{ color: "var(--text-3)", fontSize: 13 }}>暂无标签</span>
+              )}
+            </div>
+          </section>
+        </aside>
+      </div>
     </div>
   );
 }

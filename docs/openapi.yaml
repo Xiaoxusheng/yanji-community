@@ -146,7 +146,7 @@ paths:
                 title: { type: string, minLength: 5, maxLength: 200 }
                 body_markdown: { type: string }
                 category_slug: { type: string }
-                post_type: { type: string, enum: [discussion, article] }
+                post_type: { type: string, enum: [discussion, article, question, poll] }
                 tag_slugs: { type: array, maxItems: 5, items: { type: string } }
                 is_draft: { type: boolean }
       responses: { '201': { description: 已发布 }, '202': { description: 进入待审核 }, '403': { description: 未验证邮箱/受罚 }, '400': { description: 内容违规或参数错误 } }
@@ -327,7 +327,13 @@ paths:
     post: { summary: 积分调整（备注必填，写流水+审计）, responses: { '200': { description: OK } } }
   /admin/users/{id}/badges:
     post: { summary: 授予勋章, responses: { '200': { description: OK } } }
-    delete: { summary: 收回勋章, responses: { '200': { description: OK } } }
+  /admin/users/{id}/badges/{badgeId}:
+    delete:
+      summary: 收回勋章
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+        - { name: badgeId, in: path, required: true, schema: { type: integer } }
+      responses: { '200': { description: OK } }
   /admin/appeals:
     get: { summary: 申诉队列（report.handle）, responses: { '200': { description: OK } } }
   /admin/appeals/{id}/handle:
@@ -338,5 +344,10 @@ paths:
   /admin/activities:
     get: { summary: 活动管理列表, responses: { '200': { description: OK } } }
     post: { summary: 创建活动, responses: { '201': { description: OK } } }
+  /admin/activities/{id}/participants:
+    get:
+      summary: 活动报名名单（后台）
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { description: OK } }
   /admin/activities/{id}/attend:
     post: { summary: 标记出席并发放积分奖励, responses: { '200': { description: OK } } }

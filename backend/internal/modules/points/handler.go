@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/yanji-community/backend/internal/modules/moderation"
 	"github.com/yanji-community/backend/internal/shared/apperr"
 	httpx "github.com/yanji-community/backend/internal/shared/httpx"
 	"github.com/yanji-community/backend/internal/shared/pagination"
@@ -29,8 +30,6 @@ func (h *Handler) RegisterUser(rg *gin.RouterGroup) {
 		g.GET("/me/points/transactions", h.MyTransactions)
 		g.POST("/me/check-in", httpx.RequireVerified(), h.CheckIn)
 	}
-	rg.GET("/badges", h.Badges)
-	rg.GET("/users/:username/badges", h.UserBadges)
 }
 
 // RegisterAdmin 后台路由。
@@ -182,15 +181,19 @@ func (h *Handler) AdjustPoints(c *gin.Context) {
 		respond.Fail(c, invalid("必须填写调整说明（写入流水与审计）"))
 		return
 	}
-	// 服务端生成幂等键（一次请求一次账）
+	// 服务端生成幂等键（一次请求一次账，同金额多次调整不冲突）
 	buf := make([]byte, 8)
 	_, _ = rand.Read(buf)
 	key := "adminadj:" + hex.EncodeToString(buf)
-	if err := h.svc.Grant(c.Request.Context(), userID, SourceAdminAdjust, 0, req.Amount, req.Note, u.ID); err != nil {
+	audit := &moderation.Detail{
+		Action: "points.adjust", TargetType: "user", TargetID: userID,
+		ActorID: u.ID, RequestID: c.GetString("request_id"), IP: c.ClientIP(),
+		Note: itoa(req.Amount) + "；" + req.Note,
+	}
+	if err := h.svc.GrantWithKey(c.Request.Context(), userID, SourceAdminAdjust, 0, key, req.Amount, req.Note, u.ID, audit); err != nil {
 		respond.Fail(c, err)
 		return
 	}
-	_ = key
 	respond.OK(c, gin.H{"message": "积分已调整"})
 }
 
@@ -224,6 +227,12 @@ func (h *Handler) GrantBadge(c *gin.Context) {
 		respond.Fail(c, apperr.Internal(err))
 		return
 	}
+	if h.svc.audit != nil {
+		h.svc.audit.LogInTx(c.Request.Context(), tx, moderation.Detail{
+			Action: "badge.grant", TargetType: "user", TargetID: userID,
+			ActorID: httpx.CurrentUser(c).ID, RequestID: c.GetString("request_id"), IP: c.ClientIP(), Note: code,
+		})
+	}
 	if err := tx.Commit(c.Request.Context()); err != nil {
 		respond.Fail(c, apperr.Internal(err))
 		return
@@ -233,6 +242,7 @@ func (h *Handler) GrantBadge(c *gin.Context) {
 
 // RevokeBadge DELETE /admin/users/:id/badges/:badgeId
 func (h *Handler) RevokeBadge(c *gin.Context) {
+	u := httpx.CurrentUser(c)
 	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	badgeID, err2 := strconv.ParseInt(c.Param("badgeId"), 10, 64)
 	if err != nil || err2 != nil || userID <= 0 || badgeID <= 0 {
@@ -248,6 +258,12 @@ func (h *Handler) RevokeBadge(c *gin.Context) {
 	if tag.RowsAffected() == 0 {
 		respond.Fail(c, apperr.NotFound("该用户未持有此勋章"))
 		return
+	}
+	if h.svc.audit != nil {
+		h.svc.audit.Log(c.Request.Context(), moderation.Detail{
+			Action: "badge.revoke", TargetType: "user", TargetID: userID,
+			ActorID: u.ID, RequestID: c.GetString("request_id"), IP: c.ClientIP(), Note: "badge_id=" + itoa(badgeID),
+		})
 	}
 	respond.OK(c, gin.H{"message": "勋章已收回"})
 }

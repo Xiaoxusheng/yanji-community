@@ -16,8 +16,7 @@ CREATE TABLE users (
     deleted_at        TIMESTAMPTZ,
     CONSTRAINT users_username_unique UNIQUE (username),
     CONSTRAINT users_email_unique UNIQUE (email_norm),
-    CONSTRAINT users_public_id_unique UNIQUE (public_id),
-    CONSTRAINT users_status_check CHECK (status <> '' )
+    CONSTRAINT users_public_id_unique UNIQUE (public_id)
 );
 CREATE INDEX idx_users_status_created ON users (status, created_at DESC);
 

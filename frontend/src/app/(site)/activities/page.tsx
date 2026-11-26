@@ -1,13 +1,14 @@
 "use client";
 
-// 活动列表与详情报名。
+// 社区活动列表。
 import Link from "next/link";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, type PageData } from "@/lib/api";
 import type { Activity } from "@/lib/types";
-import { ListSkeleton, ErrorState, EmptyState, Pagination } from "@/components/ui/States";
+import { ListSkeleton, ErrorState, EmptyState, PageHeader, Pagination } from "@/components/ui/States";
 import { fmtRange } from "@/components/activities/ActivityDetail";
+import { IconCalendar, IconMapPin } from "@/components/ui/Icons";
 
 export default function ActivitiesPage() {
   const [page, setPage] = useState(1);
@@ -17,38 +18,46 @@ export default function ActivitiesPage() {
   });
 
   return (
-    <div style={{ maxWidth: 820, margin: "0 auto" }}>
-      <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
-        <h1 style={{ fontSize: 20, fontWeight: 700 }}>🎉 社区活动</h1>
-        <span style={{ marginLeft: "auto", fontSize: 13, color: "var(--text-3)" }}>
-          参加活动可获得积分奖励
-        </span>
-      </div>
+    <div style={{ maxWidth: 840, margin: "0 auto" }}>
+      <PageHeader title="社区活动" subtitle="线上交流与线下聚会，出席签到可获得额外积分" />
       {list.isLoading && <ListSkeleton count={3} />}
       {list.error && <ErrorState message={(list.error as Error).message} onRetry={() => list.refetch()} />}
       {list.data && list.data.items.length === 0 && (
-        <EmptyState title="暂无进行中的活动" description="活动发布后会显示在这里" />
+        <EmptyState title="暂无进行中的活动" description="有新活动发布时会展示在这里" />
       )}
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {(list.data?.items ?? []).map((a) => (
-          <Link key={a.id} href={`/activities/${a.id}`} className="card" style={{ padding: 16, display: "flex", gap: 14, alignItems: "center" }}>
+          <Link key={a.id} href={`/activities/${a.id}`} className="card card-interactive" style={{ padding: 18, display: "flex", gap: 14, alignItems: "center" }}>
             <div
               style={{
-                width: 56, height: 56, borderRadius: 12, background: "var(--brand-soft)",
-                display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26, flexShrink: 0,
+                width: 48,
+                height: 48,
+                borderRadius: 12,
+                background: "var(--bg-inset)",
+                border: "1px solid var(--border)",
+                color: "var(--text-2)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
               }}
               aria-hidden
             >
-              🎯
+              <IconCalendar size={20} />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 700, fontSize: 15.5 }}>{a.title}</div>
-              <div style={{ fontSize: 13, color: "var(--text-3)", marginTop: 2 }}>
-                {fmtRange(a)}{a.location && ` · ${a.location}`}
+              <div style={{ fontWeight: 650, fontSize: 15.5 }}>{a.title}</div>
+              <div style={{ fontSize: 13, color: "var(--text-3)", marginTop: 3, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <span>{fmtRange(a)}</span>
+                {a.location && (
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                    <IconMapPin size={12} /> {a.location}
+                  </span>
+                )}
               </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
-                <span className="tag">{a.participant_count}/{a.capacity || "∞"} 人</span>
-                {a.reward_points > 0 && <span className="tag tag-success">+{a.reward_points} 积分</span>}
+              <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+                <span className="tag tabular-nums">{a.participant_count}/{a.capacity || "∞"} 人报名</span>
+                {a.reward_points > 0 && <span className="tag tag-success tabular-nums">+{a.reward_points} 积分</span>}
                 {a.capacity > 0 && a.participant_count >= a.capacity && <span className="tag tag-warning">名额已满</span>}
               </div>
             </div>

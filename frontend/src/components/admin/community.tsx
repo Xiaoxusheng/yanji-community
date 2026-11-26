@@ -5,12 +5,20 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Table, Card, Button, Space, Tag, Modal, Form, Input, Select, InputNumber,
-  DatePicker, message, Popconfirm, Statistic,
+  DatePicker, message, Popconfirm, Statistic, Drawer,
 } from "antd";
 import { api, timeAgo } from "@/lib/api";
 import type { Activity, Appeal, Badge } from "@/lib/types";
 
 const { RangePicker } = DatePicker;
+
+type Participant = {
+  user_id: number;
+  username: string;
+  name: string;
+  status: string;
+  signed_at: string;
+};
 
 // ---------- 活动管理 ----------
 
@@ -18,6 +26,7 @@ export function AdminActivitiesPage() {
   const qc = useQueryClient();
   const [editing, setEditing] = useState<Activity | null>(null);
   const [creating, setCreating] = useState(false);
+  const [partAct, setPartAct] = useState<Activity | null>(null);
   const [form] = Form.useForm();
 
   const list = useQuery({
@@ -25,19 +34,38 @@ export function AdminActivitiesPage() {
     queryFn: () => api.get<{ items: Activity[] }>("/admin/activities"),
   });
 
+  const participants = useQuery({
+    enabled: !!partAct,
+    queryKey: ["admin-activity-participants", partAct?.id],
+    queryFn: () => api.get<{ items: Participant[] }>(`/admin/activities/${partAct!.id}/participants`),
+  });
+
+  const markAttended = async (userId: number) => {
+    if (!partAct) return;
+    try {
+      const res = await api.post<{ message: string }>(`/admin/activities/${partAct.id}/attend`, { user_id: userId });
+      message.success(res.message || "已标记出席");
+      qc.invalidateQueries({ queryKey: ["admin-activity-participants", partAct.id] });
+      qc.invalidateQueries({ queryKey: ["admin-activities"] });
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  };
+
   const save = async () => {
     const v = await form.validateFields();
     const range = v.range as [{ $d: Date } | null, { $d: Date } | null] | undefined;
-    const payload = {
+    const payload: Record<string, unknown> = {
       title: v.title,
       description: v.description ?? "",
       location: v.location ?? "",
-      starts_at: range?.[0]?.$d ? new Date(range[0].$d).toISOString() : v.starts_at,
-      ends_at: range?.[1]?.$d ? new Date(range[1].$d).toISOString() : undefined,
       capacity: v.capacity ?? 0,
       reward_points: v.reward_points ?? 0,
       status: v.status ?? "draft",
     };
+    if (range?.[0]?.$d) payload.starts_at = new Date(range[0].$d).toISOString();
+    else if (!editing && v.starts_at) payload.starts_at = v.starts_at;
+    if (range?.[1]?.$d) payload.ends_at = new Date(range[1].$d).toISOString();
     try {
       if (editing) {
         await api.patch(`/admin/activities/${editing.id}`, payload);
@@ -77,10 +105,11 @@ export function AdminActivitiesPage() {
             ),
           },
           {
-            title: "操作", width: 220,
+            title: "操作", width: 290,
             render: (_, r) => (
-              <Space size={4}>
+              <Space size={4} wrap>
                 <Button size="small" onClick={() => { setEditing(r); form.setFieldsValue({ title: r.title, description: r.description, location: r.location, capacity: r.capacity, reward_points: r.reward_points, status: r.status }); }}>编辑</Button>
+                <Button size="small" onClick={() => setPartAct(r)}>名单 / 签到</Button>
                 {r.status === "draft" && (
                   <Button size="small" type="primary" onClick={async () => { await api.patch(`/admin/activities/${r.id}`, { status: "published" }); message.success("已发布"); qc.invalidateQueries({ queryKey: ["admin-activities"] }); }}>发布</Button>
                 )}
@@ -128,6 +157,51 @@ export function AdminActivitiesPage() {
           </Space>
         </Form>
       </Modal>
+      <Drawer
+        title={partAct ? `报名名单与签到：${partAct.title}` : ""}
+        open={!!partAct}
+        onClose={() => setPartAct(null)}
+        width={600}
+      >
+        <Table<Participant>
+          rowKey="user_id"
+          loading={participants.isLoading}
+          dataSource={participants.data?.items ?? []}
+          pagination={false}
+          locale={{ emptyText: "暂无报名记录" }}
+          columns={[
+            {
+              title: "用户",
+              render: (_, p) => (
+                <span>{p.name} <span style={{ color: "#999" }}>@{p.username}</span></span>
+              ),
+            },
+            {
+              title: "状态", dataIndex: "status", width: 90,
+              render: (s: string) => (
+                <Tag color={s === "attended" ? "green" : s === "cancelled" ? "default" : "blue"}>
+                  {s === "attended" ? "已出席" : s === "cancelled" ? "已取消" : "已报名"}
+                </Tag>
+              ),
+            },
+            {
+              title: "报名时间", dataIndex: "signed_at", width: 130,
+              render: (v: string) => timeAgo(v),
+            },
+            {
+              title: "操作", width: 110,
+              render: (_, p) =>
+                p.status === "signed_up" ? (
+                  <Popconfirm title={`确认标记 @${p.username} 已出席并结算积分？`} onConfirm={() => markAttended(p.user_id)}>
+                    <Button size="small" type="primary">标记出席</Button>
+                  </Popconfirm>
+                ) : (
+                  <span style={{ color: "#999", fontSize: 12 }}>—</span>
+                ),
+            },
+          ]}
+        />
+      </Drawer>
     </Card>
   );
 }

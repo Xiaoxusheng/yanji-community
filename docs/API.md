@@ -13,15 +13,17 @@
 
 | Method | Path | 说明 | 备注 |
 |---|---|---|---|
-| POST | /auth/register | {username,email,password} → 需邮箱验证 | 防枚举统一提示；限流 |
-| POST | /auth/login | {account,password} → set-cookie | 失败计数限流；写 login_logs |
+| GET | /auth/captcha | 获取一次性图形验证码 | PNG Data URI；5 分钟有效；限流 |
+| POST | /auth/register | {username,email,password,captcha_id,captcha_code} → 需邮箱验证 | 强密码+验证码；防枚举统一提示；限流 |
+| POST | /auth/login | {account,password,captcha_id,captcha_code} → set-cookie | 图形验证码+单账号失败锁定；写 login_logs |
 | POST | /auth/logout | 撤销当前会话 | |
 | POST | /auth/logout-all | 撤销全部会话 | |
 | GET | /auth/me | 当前用户（游客→authenticated:false） | |
 | POST | /auth/email/verify | {token} 验证邮箱 | |
 | POST | /auth/email/resend | 重发验证邮件 | 已验证返回 OK 不泄露 |
-| POST | /auth/password/forgot | {email} 发起重置 | 防枚举；限流 |
+| POST | /auth/password/forgot | {email,captcha_id,captcha_code} 发起重置 | 图形验证码；防枚举；限流 |
 | POST | /auth/password/reset | {token,new_password} | 成功撤销全部会话 |
+| POST | /auth/password/change | {old_password,new_password} | 登录；撤销旧会话并轮换当前 Cookie |
 | GET | /auth/sessions | 会话设备列表 | 登录 |
 | DELETE | /auth/sessions/{id} | 撤销指定会话 | 登录，仅本人 |
 
@@ -32,10 +34,10 @@
 | GET | /users/{username} | 公开资料 + 计数 + is_following（隐私设置控制） |
 | GET | /users/{username}/posts | 公开帖子（published） |
 | GET | /users/{username}/followers · /following | 遵循 show_followers |
-| PATCH | /me/profile | display_name/bio/avatar_key/website/location |
-| PATCH | /me/settings | profile_visibility/show_followers/notify_* |
+| GET/PATCH | /me/profile | 个人资料与私信开关（含 allow_direct_messages；支持改 display_name/bio/avatar_key/website/location） |
+| PATCH | /me/settings | profile_visibility/show_followers/allow_direct_messages/notify_* |
 | GET | /me/posts | 自己全部帖子 ?status= |
-| GET | /me/overview | 个人中心聚合（帖子/评论/收藏/关注计数） |
+| GET | /me/overview | 个人中心聚合（规划中，待实现） |
 | GET | /me/following?type=user\|category\|tag | 我的关注 |
 | GET | /me/followers | 我的粉丝 |
 | POST | /users/{publicId}/follow · DELETE | 关注/取关（幂等） |
@@ -98,22 +100,21 @@
 | GET | /admin/users · /admin/users/{id} | user.read |
 | POST | /admin/users/{id}/sanctions · DELETE .../sanctions/{sid} | user.sanction |
 | POST | /admin/users/{id}/unban | user.sanction |
-| GET | /admin/posts?status= · /admin/comments | post.read |
-| POST | /admin/posts/{id}/moderate | post.moderate（版主校验版块范围） |
+| GET | /admin/posts?status= · /admin/comments | post.read（含 pending_review 待审队列） |
+| POST | /admin/posts/{id}/moderate | post.moderate（统一支持 approve/reject/hide/restore/lock/unlock/pin/unpin/feature/unfeature/move_category，版主校验版块范围） |
 | POST | /admin/comments/{id}/moderate | comment.moderate |
 | GET/POST/PATCH/DELETE | /admin/categories[/{id}] | category.manage |
 | POST | /admin/categories/{id}/moderators · DELETE | category.manage |
 | GET/POST/PATCH/DELETE | /admin/tags[/{id}] | tag.manage |
 | GET/POST/PATCH/DELETE | /admin/announcements[/{id}] | announcement.manage |
-| POST | /admin/posts/{id}/feature · /unfeature · /pin | post.feature / post.pin |
 | GET | /admin/reports · POST /admin/reports/{id}/resolve | report.handle |
-| GET | /admin/moderation/queue | post.moderate |
 | GET/POST/PATCH/DELETE | /admin/sensitive-words[/{id}] | moderation.manage |
 | GET | /admin/roles · /admin/permissions | role.read |
-| POST | /admin/users/{id}/roles · DELETE | role.assign |
+| POST | /admin/users/{id}/roles · DELETE ?role_id=&scope_id= | role.assign |
 | GET | /admin/operation-logs | audit.read |
 | GET/PATCH | /admin/settings | settings.manage（公开配置） |
 | GET | /admin/sanctions | user.read |
+| POST | /admin/ops/recalibrate | 统计校准（规划中，待实现） |
 
 ## 8. 阶段 2 接口（积分/问答/投票/活动/申诉/SSE）
 
@@ -130,8 +131,8 @@
 | GET | /me/notifications/stream | SSE 实时通知（Redis Pub/Sub，先落库后推送） |
 | POST | /admin/posts/batch-moderate | 批量审核（≤50，结果明细+汇总审计） |
 | POST | /admin/users/{id}/points-adjust | 积分调整（备注必填，写流水+审计） |
-| POST | /admin/users/{id}/badges · DELETE | 授予/收回勋章 |
-| POST/PATCH/DELETE | /admin/activities[/{id}] · POST .../attend | 活动管理/标记出席（发奖励） |
+| POST | /admin/users/{id}/badges · DELETE .../badges/{badgeId} | 授予/收回勋章 |
+| GET/POST/PATCH/DELETE | /admin/activities[/{id}] · GET .../participants · POST .../attend | 活动管理/报名名单/标记出席（发奖励） |
 | GET | /admin/appeals · POST /admin/appeals/{id}/handle | 申诉处理（通过自动解罚） |
 | GET/POST | /admin/badges | 勋章管理 |
 

@@ -23,8 +23,8 @@ const (
 const (
 	TypeDiscussion = "discussion"
 	TypeArticle    = "article"
-	TypeQuestion   = "question" // 第二阶段：规划中
-	TypePoll       = "poll"     // 第二阶段：规划中
+	TypeQuestion   = "question"
+	TypePoll       = "poll"
 )
 
 // Author 作者摘要。

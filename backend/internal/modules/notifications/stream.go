@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,7 +17,35 @@ import (
 )
 
 // Redis 频道名（通知事件发布）。
-const notifyChannelPrefix = "notify:user:"
+const (
+	notifyChannelPrefix = "notify:user:"
+	maxSSEConnsPerUser  = 5
+)
+
+var (
+	sseConnMu    sync.Mutex
+	sseConnCount = map[int64]int{}
+)
+
+func acquireSSEConn(userID int64) bool {
+	sseConnMu.Lock()
+	defer sseConnMu.Unlock()
+	if sseConnCount[userID] >= maxSSEConnsPerUser {
+		return false
+	}
+	sseConnCount[userID]++
+	return true
+}
+
+func releaseSSEConn(userID int64) {
+	sseConnMu.Lock()
+	defer sseConnMu.Unlock()
+	if sseConnCount[userID] <= 1 {
+		delete(sseConnCount, userID)
+		return
+	}
+	sseConnCount[userID]--
+}
 
 // NotifyChannel 用户通知频道。
 func NotifyChannel(userID int64) string {
@@ -31,6 +62,9 @@ type SSEEvent struct {
 // PublishNotification 通知插入成功后向 Redis 发布实时事件（消费者内调用，失败不阻断）。
 func PublishNotification(ctx context.Context, rdb redis.UniversalClient, recipientID int64, ev SSEEvent) {
 	if rdb == nil {
+		return
+	}
+	if v := reflect.ValueOf(rdb); v.Kind() == reflect.Ptr && v.IsNil() {
 		return
 	}
 	b, err := json.Marshal(ev)
@@ -50,6 +84,10 @@ func StreamHandler(rdb *redis.Client) gin.HandlerFunc {
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
+		if u.IsBanned() {
+			c.AbortWithStatus(http.StatusForbidden)
+			return
+		}
 		if rdb == nil {
 			c.String(http.StatusServiceUnavailable, "stream unavailable")
 			return
@@ -59,8 +97,14 @@ func StreamHandler(rdb *redis.Client) gin.HandlerFunc {
 			c.String(http.StatusInternalServerError, "streaming unsupported")
 			return
 		}
+		if !acquireSSEConn(u.ID) {
+			c.String(http.StatusTooManyRequests, "too many active streams")
+			return
+		}
+		defer releaseSSEConn(u.ID)
+
 		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
+		c.Header("Cache-Control", "no-store, no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("X-Accel-Buffering", "no")
 
@@ -88,7 +132,9 @@ func StreamHandler(rdb *redis.Client) gin.HandlerFunc {
 				if !ok {
 					return
 				}
-				if _, err := fmt.Fprintf(c.Writer, "event: notification\ndata: %s\n\n", msg.Payload); err != nil {
+				// 防止消息内意外换行破坏 SSE 帧边界
+				safePayload := strings.ReplaceAll(strings.ReplaceAll(msg.Payload, "\r", ""), "\n", " ")
+				if _, err := fmt.Fprintf(c.Writer, "event: notification\ndata: %s\n\n", safePayload); err != nil {
 					return
 				}
 				flusher.Flush()

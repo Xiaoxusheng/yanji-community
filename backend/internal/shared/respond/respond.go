@@ -2,6 +2,7 @@
 package respond
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -54,8 +55,16 @@ func Page(c *gin.Context, items any, page, pageSize int, total int64) {
 }
 
 // Fail 错误响应：业务错误透出稳定 Code，未知错误归一 INTERNAL_ERROR。
-// 服务端错误的底层原因由调用方或日志中间件记录，不返回给客户端。
+// 5xx 内部错误在服务端记录真实原因，绝不将底层细节透传给客户端。
 func Fail(c *gin.Context, err error) {
 	ae := apperr.From(err)
-	c.AbortWithStatusJSON(ae.Status, envelope{Code: ae.Code, Message: ae.Message, Data: nil, RequestID: requestID(c)})
+	rid := requestID(c)
+	if ae.Status >= http.StatusInternalServerError {
+		var method, path string
+		if c != nil && c.Request != nil {
+			method, path = c.Request.Method, c.Request.URL.Path
+		}
+		slog.Error("internal error", "method", method, "path", path, "request_id", rid, "err", err)
+	}
+	c.AbortWithStatusJSON(ae.Status, envelope{Code: ae.Code, Message: ae.Message, Data: nil, RequestID: rid})
 }

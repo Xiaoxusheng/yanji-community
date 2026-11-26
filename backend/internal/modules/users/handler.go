@@ -21,18 +21,26 @@ func (h *Handler) RegisterPublic(rg *gin.RouterGroup) {
 	rg.GET("/users/:username/following", h.Following)
 }
 
-// RegisterMe 认证路由（/me/*）。
+// RegisterMe 认证路由（/me/*，强制 RequireAuth 防止游客空指针访问）。
 func (h *Handler) RegisterMe(rg *gin.RouterGroup) {
-	rg.GET("/me/profile", h.MyProfile)
-	rg.PATCH("/me/profile", h.UpdateProfile)
-	rg.PATCH("/me/settings", h.UpdateSettings)
-	rg.GET("/me/following", h.MyFollowing)
-	rg.GET("/me/followers", h.MyFollowers)
+	g := rg.Group("")
+	g.Use(httpx.RequireAuth())
+	{
+		g.GET("/me/profile", h.MyProfile)
+		g.PATCH("/me/profile", h.UpdateProfile)
+		g.PATCH("/me/settings", h.UpdateSettings)
+		g.GET("/me/following", h.MyFollowing)
+		g.GET("/me/followers", h.MyFollowers)
+	}
 }
 
 // PublicProfile GET /users/:username
 func (h *Handler) PublicProfile(c *gin.Context) {
-	p, err := h.svc.PublicProfile(c.Request.Context(), c.Param("username"))
+	var viewerID int64
+	if u := httpx.CurrentUser(c); u != nil {
+		viewerID = u.ID
+	}
+	p, err := h.svc.PublicProfile(c.Request.Context(), c.Param("username"), viewerID)
 	if err != nil {
 		respond.Fail(c, err)
 		return
@@ -103,12 +111,17 @@ func (h *Handler) listFollow(c *gin.Context, followerList bool) {
 		respond.Fail(c, err)
 		return
 	}
-	profile, err := h.svc.PublicProfile(c.Request.Context(), c.Param("username"))
+	var viewerID int64
+	if u := httpx.CurrentUser(c); u != nil {
+		viewerID = u.ID
+	}
+	profile, err := h.svc.PublicProfile(c.Request.Context(), c.Param("username"), viewerID)
 	if err != nil {
 		respond.Fail(c, err)
 		return
 	}
-	if !profile.ShowFollowers {
+	isSelf := httpx.CurrentUser(c) != nil && httpx.CurrentUser(c).Username == c.Param("username")
+	if !isSelf && (profile.Restricted || !profile.ShowFollowers) {
 		respond.Fail(c, errFollowersPrivate)
 		return
 	}
@@ -131,7 +144,7 @@ func (h *Handler) listFollow(c *gin.Context, followerList bool) {
 	respond.Page(c, items, pq.Page, pq.PageSize, total)
 }
 
-// MyFollowing GET /me/following
+// MyFollowing GET /me/following?type=user|category|tag
 func (h *Handler) MyFollowing(c *gin.Context) {
 	u := httpx.CurrentUser(c)
 	pq, err := pagination.Parse(c)
@@ -139,12 +152,38 @@ func (h *Handler) MyFollowing(c *gin.Context) {
 		respond.Fail(c, err)
 		return
 	}
-	items, total, err := h.svc.Following(c.Request.Context(), u.ID, pq.PageSize, pq.Offset)
-	if err != nil {
-		respond.Fail(c, err)
-		return
+	switch c.DefaultQuery("type", "user") {
+	case "category":
+		items, total, err := h.svc.FollowingCategories(c.Request.Context(), u.ID, pq.PageSize, pq.Offset)
+		if err != nil {
+			respond.Fail(c, err)
+			return
+		}
+		if items == nil {
+			items = []FollowedCategoryRow{}
+		}
+		respond.Page(c, items, pq.Page, pq.PageSize, total)
+	case "tag":
+		items, total, err := h.svc.FollowingTags(c.Request.Context(), u.ID, pq.PageSize, pq.Offset)
+		if err != nil {
+			respond.Fail(c, err)
+			return
+		}
+		if items == nil {
+			items = []FollowedTagRow{}
+		}
+		respond.Page(c, items, pq.Page, pq.PageSize, total)
+	default:
+		items, total, err := h.svc.Following(c.Request.Context(), u.ID, pq.PageSize, pq.Offset)
+		if err != nil {
+			respond.Fail(c, err)
+			return
+		}
+		if items == nil {
+			items = []FollowerRow{}
+		}
+		respond.Page(c, items, pq.Page, pq.PageSize, total)
 	}
-	respond.Page(c, items, pq.Page, pq.PageSize, total)
 }
 
 // MyFollowers GET /me/followers

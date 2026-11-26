@@ -18,9 +18,14 @@ export default function AdminPostsPage() {
   const [status, setStatus] = useState("");
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
+  const [batchPending, setBatchPending] = useState(false);
   const [rejectOpen, setRejectOpen] = useState<PostItem | null>(null);
   const [moveOpen, setMoveOpen] = useState<PostItem | null>(null);
-  const [form] = Form.useForm();
+  const [batchReasonAction, setBatchReasonAction] = useState<"reject" | "hide" | null>(null);
+  const [rejectForm] = Form.useForm();
+  const [moveForm] = Form.useForm();
+  const [batchForm] = Form.useForm();
 
   const list = useQuery({
     queryKey: ["admin-posts", status, q, page],
@@ -43,6 +48,34 @@ export default function AdminPostsPage() {
       qc.invalidateQueries({ queryKey: ["admin-posts"] });
     } catch (e) {
       message.error((e as Error).message);
+    }
+  };
+
+  const batchModerate = async (action: string, reason = "") => {
+    if (selectedRowKeys.length === 0) return;
+    if (selectedRowKeys.length > 50) {
+      message.warning("批量操作一次最多支持 50 篇帖子");
+      return;
+    }
+    setBatchPending(true);
+    try {
+      const res = await api.post<{ results: { id: string; ok: boolean; error?: string }[] }>(
+        "/admin/posts/batch-moderate",
+        { ids: selectedRowKeys, action, reason },
+      );
+      const okCount = res.results.filter((r) => r.ok).length;
+      const failCount = res.results.length - okCount;
+      if (failCount === 0) {
+        message.success(`批量操作完成：${okCount} 条全部成功`);
+      } else {
+        message.warning(`批量操作完成：${okCount} 条成功，${failCount} 条失败（可能状态不匹配或无权限）`);
+      }
+      setSelectedRowKeys([]);
+      qc.invalidateQueries({ queryKey: ["admin-posts"] });
+    } catch (e) {
+      message.error((e as Error).message);
+    } finally {
+      setBatchPending(false);
     }
   };
 
@@ -71,10 +104,29 @@ export default function AdminPostsPage() {
         </Space>
       }
     >
+      {selectedRowKeys.length > 0 && (
+        <div style={{ marginBottom: 12, padding: "8px 12px", background: "#f5f7fa", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+          <span style={{ fontSize: 13 }}>已选择 <strong>{selectedRowKeys.length}</strong> 篇帖子</span>
+          <Space size={6} wrap>
+            <Button size="small" type="primary" loading={batchPending} onClick={() => batchModerate("approve")}>批量通过</Button>
+            <Button size="small" danger loading={batchPending} onClick={() => setBatchReasonAction("reject")}>批量驳回</Button>
+            <Button size="small" danger loading={batchPending} onClick={() => setBatchReasonAction("hide")}>批量隐藏</Button>
+            <Button size="small" loading={batchPending} onClick={() => batchModerate("restore")}>批量恢复</Button>
+            <Button size="small" loading={batchPending} onClick={() => batchModerate("lock")}>批量锁定</Button>
+            <Button size="small" loading={batchPending} onClick={() => batchModerate("unlock")}>批量解锁</Button>
+            <Button size="small" type="link" onClick={() => setSelectedRowKeys([])}>清空</Button>
+          </Space>
+        </div>
+      )}
+
       <Table<PostItem>
         rowKey="id"
         loading={list.isLoading}
         dataSource={list.data?.items ?? []}
+        rowSelection={{
+          selectedRowKeys,
+          onChange: (keys) => setSelectedRowKeys(keys as string[]),
+        }}
         pagination={{ current: page, pageSize: 20, total: list.data?.total ?? 0, onChange: setPage }}
         columns={[
           {
@@ -83,7 +135,7 @@ export default function AdminPostsPage() {
               <Space size={4}>
                 {r.is_pinned && <Tag color="purple">置顶</Tag>}
                 {r.is_featured && <Tag color="gold">精华</Tag>}
-                <Link href={`/p/${r.id}`} target="_blank">{r.title}</Link>
+                <Link href={`/p/${r.id}`} target="_blank" rel="noopener noreferrer">{r.title}</Link>
               </Space>
             ),
           },
@@ -136,11 +188,11 @@ export default function AdminPostsPage() {
       <Modal
         title={`驳回：${rejectOpen?.title ?? ""}`}
         open={!!rejectOpen}
-        onCancel={() => setRejectOpen(null)}
-        onOk={() => form.submit()}
+        onCancel={() => { setRejectOpen(null); rejectForm.resetFields(); }}
+        onOk={() => rejectForm.submit()}
         okText="确认驳回"
       >
-        <Form form={form} layout="vertical" onFinish={(v) => { moderate(rejectOpen!, "reject", v.reason); setRejectOpen(null); form.resetFields(); }}>
+        <Form form={rejectForm} layout="vertical" onFinish={(v) => { moderate(rejectOpen!, "reject", v.reason); setRejectOpen(null); rejectForm.resetFields(); }}>
           <Form.Item name="reason" label="驳回原因（必填，将通知作者）" rules={[{ required: true, message: "请填写原因" }]}>
             <Input.TextArea rows={3} maxLength={500} />
           </Form.Item>
@@ -150,13 +202,36 @@ export default function AdminPostsPage() {
       <Modal
         title={`移动版块：${moveOpen?.title ?? ""}`}
         open={!!moveOpen}
-        onCancel={() => setMoveOpen(null)}
-        onOk={() => form.submit()}
+        onCancel={() => { setMoveOpen(null); moveForm.resetFields(); }}
+        onOk={() => moveForm.submit()}
         okText="移动"
       >
-        <Form form={form} layout="vertical" onFinish={(v) => { moderate(moveOpen!, "move_category", "", v.category); setMoveOpen(null); form.resetFields(); }}>
+        <Form form={moveForm} layout="vertical" onFinish={(v) => { moderate(moveOpen!, "move_category", "", v.category); setMoveOpen(null); moveForm.resetFields(); }}>
           <Form.Item name="category" label="目标版块" rules={[{ required: true, message: "请选择版块" }]}>
             <Select options={(cats.data?.items ?? []).map((c) => ({ value: c.slug, label: c.name }))} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title={batchReasonAction === "reject" ? `批量驳回（${selectedRowKeys.length} 篇）` : `批量隐藏（${selectedRowKeys.length} 篇）`}
+        open={!!batchReasonAction}
+        onCancel={() => { setBatchReasonAction(null); batchForm.resetFields(); }}
+        onOk={() => batchForm.submit()}
+        okText="确认执行"
+      >
+        <Form
+          form={batchForm}
+          layout="vertical"
+          onFinish={(v) => {
+            const act = batchReasonAction!;
+            setBatchReasonAction(null);
+            batchForm.resetFields();
+            void batchModerate(act, v.reason);
+          }}
+        >
+          <Form.Item name="reason" label="处理原因（必填，将通知作者）" rules={[{ required: true, message: "请填写原因" }]}>
+            <Input.TextArea rows={3} maxLength={500} />
           </Form.Item>
         </Form>
       </Modal>

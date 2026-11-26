@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -89,6 +90,44 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 }
 
 func invalid(msg string) error { return apperr.BadRequest("VALIDATION_ERROR", msg) }
+
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+func escapeLike(s string) string { return likeEscaper.Replace(s) }
+
+// userRoleRank 计算用户最高系统角色等级（superadmin=3 > admin=2 > moderator=1 > member=0），用于防越权处罚与提权。
+func (h *Handler) userRoleRank(ctx context.Context, userID int64) (int, error) {
+	rows, err := h.svc.pool.Query(ctx, `
+		SELECT r.code FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1`, userID)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	rank := 0
+	for rows.Next() {
+		var code string
+		if rows.Scan(&code) == nil {
+			r := roleCodeRank(code)
+			if r > rank {
+				rank = r
+			}
+		}
+	}
+	return rank, rows.Err()
+}
+
+func roleCodeRank(code string) int {
+	switch code {
+	case "superadmin":
+		return 3
+	case "admin":
+		return 2
+	case "moderator":
+		return 1
+	default:
+		return 0
+	}
+}
 
 // ---- 仪表盘 ----
 
@@ -186,8 +225,8 @@ func (h *Handler) Users(c *gin.Context) {
 		where += ` AND u.status = $` + strconv.Itoa(len(args))
 	}
 	if qs := c.Query("q"); qs != "" {
-		args = append(args, "%"+qs+"%")
-		where += ` AND (u.username ILIKE $` + strconv.Itoa(len(args)) + ` OR u.email_norm ILIKE $` + strconv.Itoa(len(args)) + `)`
+		args = append(args, "%"+escapeLike(qs)+"%")
+		where += ` AND (u.username ILIKE $` + strconv.Itoa(len(args)) + ` ESCAPE '\' OR u.email_norm ILIKE $` + strconv.Itoa(len(args)) + ` ESCAPE '\')`
 	}
 	var total int64
 	if err := h.svc.pool.QueryRow(c.Request.Context(),
@@ -251,9 +290,29 @@ func (h *Handler) UserDetail(c *gin.Context) {
 	}
 	roles, _ := h.svc.rbacSvc.UserRoles(ctx, id)
 	sanctions, _ := h.svc.sanction.ListByUser(ctx, id)
+	// 已持有勋章（供后台查看/收回）
+	type badgeRow struct {
+		ID   int64  `json:"id"`
+		Code string `json:"code"`
+		Name string `json:"name"`
+		Icon string `json:"icon"`
+	}
+	badges := []badgeRow{}
+	if brows, berr := h.svc.pool.Query(ctx, `
+		SELECT b.id, b.code, b.name, b.icon
+		FROM user_badges ub JOIN badges b ON b.id = ub.badge_id
+		WHERE ub.user_id = $1 ORDER BY ub.created_at DESC`, id); berr == nil {
+		defer brows.Close()
+		for brows.Next() {
+			var br badgeRow
+			if brows.Scan(&br.ID, &br.Code, &br.Name, &br.Icon) == nil {
+				badges = append(badges, br)
+			}
+		}
+	}
 	respond.OK(c, gin.H{
 		"user": row, "bio": bio, "website": website, "location": location,
-		"roles": roles, "sanctions": sanctions,
+		"roles": roles, "sanctions": sanctions, "badges": badges,
 	})
 }
 
@@ -282,10 +341,29 @@ func (h *Handler) CreateSanction(c *gin.Context) {
 		respond.Fail(c, invalid("处罚必须填写原因"))
 		return
 	}
+	if id == u.ID {
+		respond.Fail(c, apperr.Forbidden("不能处罚自己的账号"))
+		return
+	}
 	var targetPublicID string
 	if err := h.svc.pool.QueryRow(c.Request.Context(),
-		`SELECT public_id::text FROM users WHERE id = $1`, id).Scan(&targetPublicID); err != nil {
+		`SELECT public_id::text FROM users WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&targetPublicID); err != nil {
 		respond.Fail(c, apperr.NotFound("用户不存在"))
+		return
+	}
+	// 角色层级保护：禁止处罚同级或更高级管理员（如普通 admin 不得封禁 superadmin）
+	actorRank, err := h.userRoleRank(c.Request.Context(), u.ID)
+	if err != nil {
+		respond.Fail(c, apperr.Internal(err))
+		return
+	}
+	targetRank, err := h.userRoleRank(c.Request.Context(), id)
+	if err != nil {
+		respond.Fail(c, apperr.Internal(err))
+		return
+	}
+	if targetRank >= actorRank && targetRank >= 2 {
+		respond.Fail(c, apperr.Forbidden("不能处罚同级或更高级别的管理员"))
 		return
 	}
 	tx, err := h.svc.pool.Begin(c.Request.Context())
@@ -303,10 +381,17 @@ func (h *Handler) CreateSanction(c *gin.Context) {
 		respond.Fail(c, err)
 		return
 	}
-	// 永久封禁同时更新用户状态
+	// 永久封禁更新用户状态；封禁类处罚（perma_ban/temp_ban）立即吊销所有活跃会话强制踢下线
 	if req.Type == "perma_ban" {
 		if _, err := tx.Exec(c.Request.Context(),
 			`UPDATE users SET status = 'banned' WHERE id = $1`, id); err != nil {
+			respond.Fail(c, apperr.Internal(err))
+			return
+		}
+	}
+	if req.Type == "perma_ban" || req.Type == "temp_ban" {
+		if _, err := tx.Exec(c.Request.Context(),
+			`UPDATE user_sessions SET revoked_at = now_utc() WHERE user_id = $1 AND revoked_at IS NULL`, id); err != nil {
 			respond.Fail(c, apperr.Internal(err))
 			return
 		}
@@ -330,6 +415,11 @@ func (h *Handler) CreateSanction(c *gin.Context) {
 // LiftSanction DELETE /admin/users/:id/sanctions/:sanctionId
 func (h *Handler) LiftSanction(c *gin.Context) {
 	u := httpx.CurrentUser(c)
+	targetUID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || targetUID <= 0 {
+		respond.Fail(c, invalid("用户 ID 不合法"))
+		return
+	}
 	sid, err := strconv.ParseInt(c.Param("sanctionId"), 10, 64)
 	if err != nil || sid <= 0 {
 		respond.Fail(c, invalid("ID 不合法"))
@@ -341,16 +431,36 @@ func (h *Handler) LiftSanction(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback(c.Request.Context())
+	// 校验处罚归属目标用户，防止跨用户解除
+	var ownerID int64
+	if err := tx.QueryRow(c.Request.Context(),
+		`SELECT user_id FROM user_sanctions WHERE id = $1`, sid).Scan(&ownerID); err != nil || ownerID != targetUID {
+		respond.Fail(c, apperr.NotFound("处罚记录不存在"))
+		return
+	}
 	if err := h.svc.sanction.Lift(c.Request.Context(), tx, sid); err != nil {
 		respond.Fail(c, err)
 		return
 	}
-	// 若为永久封禁解除则恢复账号状态
-	if _, err := tx.Exec(c.Request.Context(), `
-		UPDATE users SET status = 'active'
-		WHERE id = (SELECT user_id FROM user_sanctions WHERE id = $1) AND status = 'banned'`, sid); err != nil {
+	// 仅在不存在其他生效封禁处罚时，才恢复 banned 状态为 active（防止解除 warn 误解封 perma_ban）
+	var stillBanned bool
+	if err := tx.QueryRow(c.Request.Context(), `
+		SELECT EXISTS(
+			SELECT 1 FROM user_sanctions
+			WHERE user_id = $1 AND status = 'active'
+			  AND sanction_type IN ('perma_ban', 'temp_ban')
+			  AND (ends_at IS NULL OR ends_at > now_utc())
+		)`, targetUID).Scan(&stillBanned); err != nil {
 		respond.Fail(c, apperr.Internal(err))
 		return
+	}
+	if !stillBanned {
+		if _, err := tx.Exec(c.Request.Context(), `
+			UPDATE users SET status = 'active'
+			WHERE id = $1 AND status = 'banned'`, targetUID); err != nil {
+			respond.Fail(c, apperr.Internal(err))
+			return
+		}
 	}
 	h.svc.audit.LogInTx(c.Request.Context(), tx, moderation.Detail{
 		Action: "user.sanction.lift", TargetType: "sanction", TargetID: sid,
@@ -466,6 +576,47 @@ func (h *Handler) AssignRole(c *gin.Context) {
 		respond.Fail(c, invalid("请求体格式不正确"))
 		return
 	}
+	if req.Scope == "" {
+		req.Scope = "global"
+	}
+	if req.Scope != "global" && req.Scope != "category" {
+		respond.Fail(c, invalid("scope 必须为 global 或 category"))
+		return
+	}
+	var roleCode string
+	if err := h.svc.pool.QueryRow(c.Request.Context(), `SELECT code FROM roles WHERE id = $1`, req.RoleID).Scan(&roleCode); err != nil {
+		respond.Fail(c, apperr.NotFound("角色不存在"))
+		return
+	}
+	// 角色层级与作用域防护：admin/superadmin 禁止使用 category 作用域，仅 superadmin 可授予 superadmin
+	actorRank, err := h.userRoleRank(c.Request.Context(), u.ID)
+	if err != nil {
+		respond.Fail(c, apperr.Internal(err))
+		return
+	}
+	if roleCodeRank(roleCode) > actorRank || (roleCode == "superadmin" && actorRank < 3) {
+		respond.Fail(c, apperr.Forbidden("无权授予高于自身层级的角色"))
+		return
+	}
+	if roleCode == "admin" || roleCode == "superadmin" || roleCode == "member" {
+		req.Scope = "global"
+		req.Category = 0
+	}
+	if roleCode == "moderator" {
+		req.Scope = "category"
+	}
+	if req.Scope == "category" {
+		if req.Category <= 0 {
+			respond.Fail(c, invalid("版块范围角色必须指定 category_id"))
+			return
+		}
+		var exists bool
+		_ = h.svc.pool.QueryRow(c.Request.Context(), `SELECT EXISTS(SELECT 1 FROM categories WHERE id = $1 AND deleted_at IS NULL)`, req.Category).Scan(&exists)
+		if !exists {
+			respond.Fail(c, apperr.NotFound("版块不存在"))
+			return
+		}
+	}
 	tx, err := h.svc.pool.Begin(c.Request.Context())
 	if err != nil {
 		respond.Fail(c, apperr.Internal(err))
@@ -476,10 +627,15 @@ func (h *Handler) AssignRole(c *gin.Context) {
 		respond.Fail(c, apperr.Internal(err))
 		return
 	}
+	if roleCode == "moderator" && req.Category > 0 {
+		_, _ = tx.Exec(c.Request.Context(), `
+			INSERT INTO category_moderators (category_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			req.Category, id)
+	}
 	h.svc.audit.LogInTx(c.Request.Context(), tx, moderation.Detail{
 		Action: "role.assign", TargetType: "user", TargetID: id,
 		ActorID: u.ID, RequestID: c.GetString("request_id"), IP: c.ClientIP(),
-		Note: "role_id=" + strconv.FormatInt(req.RoleID, 10) + " scope=" + req.Scope,
+		Note: "role_id=" + strconv.FormatInt(req.RoleID, 10) + " scope=" + req.Scope + " category_id=" + strconv.FormatInt(req.Category, 10),
 	})
 	if err := tx.Commit(c.Request.Context()); err != nil {
 		respond.Fail(c, apperr.Internal(err))
@@ -502,6 +658,34 @@ func (h *Handler) RemoveRole(c *gin.Context) {
 		respond.Fail(c, invalid("role_id 不合法"))
 		return
 	}
+	var roleCode string
+	if err := h.svc.pool.QueryRow(c.Request.Context(), `SELECT code FROM roles WHERE id = $1`, roleID).Scan(&roleCode); err != nil {
+		respond.Fail(c, apperr.NotFound("角色不存在"))
+		return
+	}
+	actorRank, err := h.userRoleRank(c.Request.Context(), u.ID)
+	if err != nil {
+		respond.Fail(c, apperr.Internal(err))
+		return
+	}
+	if roleCodeRank(roleCode) > actorRank || (roleCode == "superadmin" && actorRank < 3) {
+		respond.Fail(c, apperr.Forbidden("无权移除该层级角色"))
+		return
+	}
+	if roleCode == "superadmin" {
+		if id == u.ID {
+			respond.Fail(c, apperr.Forbidden("不能移除自身的超级管理员角色"))
+			return
+		}
+		var saCount int64
+		_ = h.svc.pool.QueryRow(c.Request.Context(), `
+			SELECT COUNT(DISTINCT ur.user_id) FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+			WHERE r.code = 'superadmin'`).Scan(&saCount)
+		if saCount <= 1 {
+			respond.Fail(c, apperr.Conflict("CONFLICT", "系统至少需保留一名超级管理员"))
+			return
+		}
+	}
 	tx, err := h.svc.pool.Begin(c.Request.Context())
 	if err != nil {
 		respond.Fail(c, apperr.Internal(err))
@@ -511,6 +695,10 @@ func (h *Handler) RemoveRole(c *gin.Context) {
 	if err := h.svc.rbacSvc.RemoveRole(c.Request.Context(), tx, id, roleID, scopeID); err != nil {
 		respond.Fail(c, err)
 		return
+	}
+	if scopeID > 0 {
+		_, _ = tx.Exec(c.Request.Context(),
+			`DELETE FROM category_moderators WHERE category_id = $1 AND user_id = $2`, scopeID, id)
 	}
 	h.svc.audit.LogInTx(c.Request.Context(), tx, moderation.Detail{
 		Action: "role.remove", TargetType: "user", TargetID: id,
@@ -993,24 +1181,44 @@ var _ = context.Background
 
 // Comments GET /admin/comments?status=&q=
 func (h *Handler) Comments(c *gin.Context) {
+	u := httpx.CurrentUser(c)
 	pq, err := pagination.Parse(c)
 	if err != nil {
 		respond.Fail(c, err)
 		return
 	}
-	where := `cm.status <> 'deleted' OR cm.deleted_at IS NOT NULL`
+	where := `(cm.status <> 'deleted' OR cm.deleted_at IS NOT NULL)`
 	args := []any{}
 	if st := c.Query("status"); st != "" {
 		args = append(args, st)
 		where = `cm.status = $` + strconv.Itoa(len(args))
 	}
 	if qs := c.Query("q"); qs != "" {
-		args = append(args, "%"+qs+"%")
-		where += ` AND cm.body_markdown ILIKE $` + strconv.Itoa(len(args))
+		args = append(args, "%"+escapeLike(qs)+"%")
+		where += ` AND cm.body_markdown ILIKE $` + strconv.Itoa(len(args)) + ` ESCAPE '\'`
+	}
+	// 版主范围隔离：非全局 comment.moderate 仅能查看授权版块内帖子的评论
+	isGlobal, err := h.svc.rbacSvc.HasGlobalPermission(c.Request.Context(), u.ID, "comment.moderate")
+	if err != nil {
+		respond.Fail(c, apperr.Internal(err))
+		return
+	}
+	if !isGlobal {
+		catIDs, err := h.svc.rbacSvc.ModeratedCategoryIDs(c.Request.Context(), u.ID)
+		if err != nil {
+			respond.Fail(c, apperr.Internal(err))
+			return
+		}
+		if len(catIDs) == 0 {
+			respond.Page(c, []any{}, pq.Page, pq.PageSize, 0)
+			return
+		}
+		args = append(args, catIDs)
+		where += ` AND p.category_id = ANY($` + strconv.Itoa(len(args)) + `)`
 	}
 	var total int64
 	if err := h.svc.pool.QueryRow(c.Request.Context(),
-		`SELECT COUNT(*) FROM comments cm WHERE `+where, args...).Scan(&total); err != nil {
+		`SELECT COUNT(*) FROM comments cm JOIN posts p ON p.id = cm.post_id WHERE `+where, args...).Scan(&total); err != nil {
 		respond.Fail(c, err)
 		return
 	}
@@ -1080,13 +1288,48 @@ func (h *Handler) ModerateComment(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
+	// 查评论所属版块与原状态：强制校验版主版块范围，并禁止将 deleted 评论恢复为 published
+	var authorID, postID, categoryID int64
+	var oldStatus string
+	err = h.svc.pool.QueryRow(ctx, `
+		SELECT cm.author_id, cm.post_id, cm.status, p.category_id
+		FROM comments cm JOIN posts p ON p.id = cm.post_id
+		WHERE cm.id = $1`, id).Scan(&authorID, &postID, &oldStatus, &categoryID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		respond.Fail(c, apperr.NotFound("评论不存在"))
+		return
+	}
+	if err != nil {
+		respond.Fail(c, apperr.Internal(err))
+		return
+	}
+	if oldStatus == "deleted" {
+		respond.Fail(c, apperr.Conflict("CONFLICT", "已删除评论不可执行该操作"))
+		return
+	}
+	isGlobal, err := h.svc.rbacSvc.HasGlobalPermission(ctx, u.ID, "comment.moderate")
+	if err != nil {
+		respond.Fail(c, apperr.Internal(err))
+		return
+	}
+	if !isGlobal {
+		can, err := h.svc.rbacSvc.CanModerateCategory(ctx, u.ID, categoryID)
+		if err != nil {
+			respond.Fail(c, apperr.Internal(err))
+			return
+		}
+		if !can {
+			respond.Fail(c, apperr.Forbidden("只能管理授权版块内的评论"))
+			return
+		}
+	}
 	tx, err := h.svc.pool.Begin(ctx)
 	if err != nil {
 		respond.Fail(c, apperr.Internal(err))
 		return
 	}
 	defer tx.Rollback(ctx)
-	tag, err := tx.Exec(ctx, `UPDATE comments SET status = $2, updated_at = now_utc() WHERE id = $1`, id, status)
+	tag, err := tx.Exec(ctx, `UPDATE comments SET status = $2, updated_at = now_utc() WHERE id = $1 AND status <> 'deleted'`, id, status)
 	if err != nil {
 		respond.Fail(c, err)
 		return
@@ -1095,8 +1338,11 @@ func (h *Handler) ModerateComment(c *gin.Context) {
 		respond.Fail(c, apperr.NotFound("评论不存在"))
 		return
 	}
-	var authorID int64
-	_ = tx.QueryRow(ctx, `SELECT author_id FROM comments WHERE id = $1`, id).Scan(&authorID)
+	if oldStatus == "published" && status != "published" {
+		_, _ = tx.Exec(ctx, `UPDATE posts SET comment_count = GREATEST(0, comment_count - 1) WHERE id = $1`, postID)
+	} else if oldStatus != "published" && status == "published" {
+		_, _ = tx.Exec(ctx, `UPDATE posts SET comment_count = comment_count + 1 WHERE id = $1`, postID)
+	}
 	h.svc.audit.LogInTx(ctx, tx, moderation.Detail{
 		Action: "comment." + req.Action, TargetType: "comment", TargetID: id,
 		ActorID: u.ID, RequestID: c.GetString("request_id"), IP: c.ClientIP(), Note: req.Reason,

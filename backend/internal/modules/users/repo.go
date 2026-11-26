@@ -20,28 +20,33 @@ func NewRepo(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
 // PublicProfile 公开资料。
 type PublicProfile struct {
-	PublicID       string    `json:"id"`
-	Username       string    `json:"username"`
-	DisplayName    string    `json:"display_name"`
-	AvatarKey      string    `json:"avatar_key"`
-	Bio            string    `json:"bio"`
-	Website        string    `json:"website"`
-	Location       string    `json:"location"`
-	CreatedAt      time.Time `json:"created_at"`
-	PostCount      int64     `json:"post_count"`
-	CommentCount   int64     `json:"comment_count"`
-	FollowerCount  int64     `json:"follower_count"`
-	FollowingCount int64     `json:"following_count"`
-	ShowFollowers  bool      `json:"show_followers"`
+	PublicID          string    `json:"id"`
+	Username          string    `json:"username"`
+	DisplayName       string    `json:"display_name"`
+	AvatarKey         string    `json:"avatar_key"`
+	Bio               string    `json:"bio"`
+	Website           string    `json:"website"`
+	Location          string    `json:"location"`
+	ProfileVisibility string    `json:"profile_visibility"`
+	Restricted        bool      `json:"restricted,omitempty"`
+	IsFollowing       bool      `json:"is_following"`
+	IsBlocked         bool      `json:"is_blocked"`
+	CreatedAt         time.Time `json:"created_at"`
+	PostCount         int64     `json:"post_count"`
+	CommentCount      int64     `json:"comment_count"`
+	FollowerCount     int64     `json:"follower_count"`
+	FollowingCount    int64     `json:"following_count"`
+	ShowFollowers     bool      `json:"show_followers"`
 }
 
-// GetPublicProfile 查询公开资料（含计数）。
-func (r *Repo) GetPublicProfile(ctx context.Context, username string) (*PublicProfile, error) {
+// GetPublicProfile 查询公开资料（含计数、关注/拉黑状态与隐私可见性）。
+func (r *Repo) GetPublicProfile(ctx context.Context, username string, viewerID int64) (*PublicProfile, error) {
 	var p PublicProfile
+	var targetID int64
 	err := r.pool.QueryRow(ctx, `
-		SELECT u.public_id::text, u.username, COALESCE(p.display_name, u.username), p.avatar_key, p.bio,
-		       p.website, p.location, u.created_at,
-		       (SELECT COUNT(*) FROM posts WHERE author_id = u.id AND status = 'published' AND deleted_at IS NULL),
+		SELECT u.id, u.public_id::text, u.username, COALESCE(p.display_name, u.username), p.avatar_key, p.bio,
+		       p.website, p.location, p.profile_visibility, u.created_at,
+		       (SELECT COUNT(*) FROM posts WHERE author_id = u.id AND status IN ('published', 'locked') AND deleted_at IS NULL),
 		       (SELECT COUNT(*) FROM comments WHERE author_id = u.id AND status = 'published' AND deleted_at IS NULL),
 		       (SELECT COUNT(*) FROM user_follows WHERE following_id = u.id),
 		       (SELECT COUNT(*) FROM user_follows WHERE follower_id = u.id),
@@ -50,14 +55,31 @@ func (r *Repo) GetPublicProfile(ctx context.Context, username string) (*PublicPr
 		JOIN user_profiles p ON p.user_id = u.id
 		WHERE u.username = $1 AND u.deleted_at IS NULL AND u.status IN ('active','pending')`,
 		username).Scan(
-		&p.PublicID, &p.Username, &p.DisplayName, &p.AvatarKey, &p.Bio,
-		&p.Website, &p.Location, &p.CreatedAt,
+		&targetID, &p.PublicID, &p.Username, &p.DisplayName, &p.AvatarKey, &p.Bio,
+		&p.Website, &p.Location, &p.ProfileVisibility, &p.CreatedAt,
 		&p.PostCount, &p.CommentCount, &p.FollowerCount, &p.FollowingCount, &p.ShowFollowers)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperr.NotFound("用户不存在")
 	}
 	if err != nil {
 		return nil, err
+	}
+	if viewerID > 0 && viewerID != targetID {
+		_ = r.pool.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM user_follows WHERE follower_id = $1 AND following_id = $2)`,
+			viewerID, targetID).Scan(&p.IsFollowing)
+		_ = r.pool.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2)`,
+			viewerID, targetID).Scan(&p.IsBlocked)
+	}
+	// 主页隐私控制：private 仅自己可见详情；followers 仅自己或已关注可见详情
+	if viewerID != targetID {
+		if p.ProfileVisibility == "private" || (p.ProfileVisibility == "followers" && !p.IsFollowing) {
+			p.Restricted = true
+			p.Bio = ""
+			p.Website = ""
+			p.Location = ""
+		}
 	}
 	return &p, nil
 }
@@ -75,15 +97,16 @@ func (r *Repo) InternalIDByUsername(ctx context.Context, username string) (int64
 
 // ProfileSetting 当前用户的资料与设置。
 type ProfileSetting struct {
-	DisplayName       string `json:"display_name"`
-	AvatarKey         string `json:"avatar_key"`
-	Bio               string `json:"bio"`
-	Website           string `json:"website"`
-	Location          string `json:"location"`
-	ProfileVisibility string `json:"profile_visibility"`
-	ShowFollowers     bool   `json:"show_followers"`
-	NotifyEmail       bool   `json:"notify_email"`
-	NotifyInapp       bool   `json:"notify_inapp"`
+	DisplayName         string `json:"display_name"`
+	AvatarKey           string `json:"avatar_key"`
+	Bio                 string `json:"bio"`
+	Website             string `json:"website"`
+	Location            string `json:"location"`
+	ProfileVisibility   string `json:"profile_visibility"`
+	ShowFollowers       bool   `json:"show_followers"`
+	NotifyEmail         bool   `json:"notify_email"`
+	NotifyInapp         bool   `json:"notify_inapp"`
+	AllowDirectMessages bool   `json:"allow_direct_messages"`
 }
 
 // GetMyProfile 查询本人资料。
@@ -91,10 +114,10 @@ func (r *Repo) GetMyProfile(ctx context.Context, userID int64) (*ProfileSetting,
 	var p ProfileSetting
 	err := r.pool.QueryRow(ctx, `
 		SELECT p.display_name, p.avatar_key, p.bio, p.website, p.location,
-		       p.profile_visibility, p.show_followers, p.notify_email, p.notify_inapp
+		       p.profile_visibility, p.show_followers, p.notify_email, p.notify_inapp, p.allow_direct_messages
 		FROM user_profiles p WHERE p.user_id = $1`, userID).Scan(
 		&p.DisplayName, &p.AvatarKey, &p.Bio, &p.Website, &p.Location,
-		&p.ProfileVisibility, &p.ShowFollowers, &p.NotifyEmail, &p.NotifyInapp)
+		&p.ProfileVisibility, &p.ShowFollowers, &p.NotifyEmail, &p.NotifyInapp, &p.AllowDirectMessages)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +158,7 @@ type FollowerRow struct {
 	CreatedAt   time.Time `json:"followed_at"`
 }
 
-// ListFollowers 粉丝列表。
+// ListFollowers 粉丝列表（尊重对方主页隐私：非 public 不返回 bio）。
 func (r *Repo) ListFollowers(ctx context.Context, userID int64, limit, offset int) ([]FollowerRow, int64, error) {
 	var total int64
 	if err := r.pool.QueryRow(ctx,
@@ -143,7 +166,9 @@ func (r *Repo) ListFollowers(ctx context.Context, userID int64, limit, offset in
 		return nil, 0, err
 	}
 	rows, err := r.pool.Query(ctx, `
-		SELECT u.public_id::text, u.username, COALESCE(p.display_name, u.username), p.avatar_key, p.bio, f.created_at
+		SELECT u.public_id::text, u.username, COALESCE(p.display_name, u.username), p.avatar_key,
+		       CASE WHEN p.profile_visibility = 'public' THEN p.bio ELSE '' END,
+		       f.created_at
 		FROM user_follows f
 		JOIN users u ON u.id = f.follower_id AND u.deleted_at IS NULL
 		JOIN user_profiles p ON p.user_id = u.id
@@ -164,7 +189,7 @@ func (r *Repo) ListFollowers(ctx context.Context, userID int64, limit, offset in
 	return out, total, rows.Err()
 }
 
-// ListFollowing 关注列表。
+// ListFollowing 关注列表（尊重对方主页隐私：非 public 不返回 bio）。
 func (r *Repo) ListFollowing(ctx context.Context, userID int64, limit, offset int) ([]FollowerRow, int64, error) {
 	var total int64
 	if err := r.pool.QueryRow(ctx,
@@ -172,7 +197,9 @@ func (r *Repo) ListFollowing(ctx context.Context, userID int64, limit, offset in
 		return nil, 0, err
 	}
 	rows, err := r.pool.Query(ctx, `
-		SELECT u.public_id::text, u.username, COALESCE(p.display_name, u.username), p.avatar_key, p.bio, f.created_at
+		SELECT u.public_id::text, u.username, COALESCE(p.display_name, u.username), p.avatar_key,
+		       CASE WHEN p.profile_visibility = 'public' THEN p.bio ELSE '' END,
+		       f.created_at
 		FROM user_follows f
 		JOIN users u ON u.id = f.following_id AND u.deleted_at IS NULL
 		JOIN user_profiles p ON p.user_id = u.id
@@ -189,6 +216,81 @@ func (r *Repo) ListFollowing(ctx context.Context, userID int64, limit, offset in
 			return nil, 0, err
 		}
 		out = append(out, fr)
+	}
+	return out, total, rows.Err()
+}
+
+// FollowedCategoryRow 关注的版块行。
+type FollowedCategoryRow struct {
+	ID          int64     `json:"id"`
+	Name        string    `json:"name"`
+	Slug        string    `json:"slug"`
+	Description string    `json:"description"`
+	PostCount   int64     `json:"post_count"`
+	FollowedAt  time.Time `json:"followed_at"`
+}
+
+// ListFollowedCategories 我关注的版块列表。
+func (r *Repo) ListFollowedCategories(ctx context.Context, userID int64, limit, offset int) ([]FollowedCategoryRow, int64, error) {
+	var total int64
+	if err := r.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM category_follows WHERE user_id = $1`, userID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT c.id, c.name, c.slug, c.description, c.post_count, cf.created_at
+		FROM category_follows cf
+		JOIN categories c ON c.id = cf.category_id AND c.deleted_at IS NULL
+		WHERE cf.user_id = $1
+		ORDER BY cf.created_at DESC LIMIT $2 OFFSET $3`, userID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []FollowedCategoryRow
+	for rows.Next() {
+		var row FollowedCategoryRow
+		if err := rows.Scan(&row.ID, &row.Name, &row.Slug, &row.Description, &row.PostCount, &row.FollowedAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, row)
+	}
+	return out, total, rows.Err()
+}
+
+// FollowedTagRow 关注的标签行。
+type FollowedTagRow struct {
+	ID         int64     `json:"id"`
+	Name       string    `json:"name"`
+	Slug       string    `json:"slug"`
+	PostCount  int64     `json:"post_count"`
+	FollowedAt time.Time `json:"followed_at"`
+}
+
+// ListFollowedTags 我关注的标签列表。
+func (r *Repo) ListFollowedTags(ctx context.Context, userID int64, limit, offset int) ([]FollowedTagRow, int64, error) {
+	var total int64
+	if err := r.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM tag_follows WHERE user_id = $1`, userID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT t.id, t.name, t.slug, t.post_count, tf.created_at
+		FROM tag_follows tf
+		JOIN tags t ON t.id = tf.tag_id AND t.status = 'active'
+		WHERE tf.user_id = $1
+		ORDER BY tf.created_at DESC LIMIT $2 OFFSET $3`, userID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []FollowedTagRow
+	for rows.Next() {
+		var row FollowedTagRow
+		if err := rows.Scan(&row.ID, &row.Name, &row.Slug, &row.PostCount, &row.FollowedAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, row)
 	}
 	return out, total, rows.Err()
 }

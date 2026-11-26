@@ -1,12 +1,13 @@
 "use client";
 
-// 投票组件：单选/多选/改票/结果百分比条。
+// 投票组件：单选/多选/改票/百分比进度条。
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "@/lib/api";
 import type { Poll } from "@/lib/types";
 import { toast } from "@/lib/toast";
 import { useMe } from "@/lib/auth";
+import { IconBarChart, IconCheck } from "@/components/ui/Icons";
 
 export function PollBox({ postId }: { postId: string }) {
   const qc = useQueryClient();
@@ -20,9 +21,13 @@ export function PollBox({ postId }: { postId: string }) {
   });
 
   if (poll.isLoading) {
-    return <div className="card" style={{ padding: 16, marginTop: 16 }}><div className="skeleton" style={{ height: 80 }} /></div>;
+    return (
+      <div className="card" style={{ padding: 16, marginTop: 16 }}>
+        <div className="skeleton" style={{ height: 80 }} />
+      </div>
+    );
   }
-  if (poll.error || !poll.data) return null; // 非投票帖静默
+  if (poll.error || !poll.data) return null;
   const p = poll.data.poll;
   const voted = p.my_votes.length > 0;
   const canVote = !!me?.authenticated && !p.expired && (!voted || p.allow_revote);
@@ -57,60 +62,82 @@ export function PollBox({ postId }: { postId: string }) {
   };
 
   return (
-    <section className="card" style={{ padding: 18, marginTop: 18 }} aria-label="投票">
+    <section className="card" style={{ padding: 18, marginTop: 18, background: "var(--bg-inset)" }} aria-label="投票">
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-        <h3 style={{ fontSize: 15, fontWeight: 700 }}>📊 投票</h3>
-        <span className="tag">{p.multiple_choice ? `多选（最多 ${p.max_choices} 项）` : "单选"}</span>
-        <span className="tag">{p.total_voters} 人参与</span>
+        <h3 style={{ fontSize: 14.5, fontWeight: 650, display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <IconBarChart size={15} /> 社区投票
+        </h3>
+        <span className="tag tag-outline">{p.multiple_choice ? `多选 · 最多 ${p.max_choices} 项` : "单选"}</span>
+        <span className="tag tag-outline tabular-nums">{p.total_voters} 人参与</span>
+        {p.allow_revote && !p.expired && <span className="tag tag-outline">可改票</span>}
         {p.expired && <span className="tag tag-warning">已截止</span>}
         {p.ends_at && !p.expired && (
-          <span style={{ fontSize: 12.5, color: "var(--text-3)" }}>
-            截止：{new Date(p.ends_at).toLocaleString("zh-CN")}
+          <span style={{ fontSize: 12, color: "var(--text-3)", marginLeft: "auto" }}>
+            截止 {new Date(p.ends_at).toLocaleString("zh-CN")}
           </span>
         )}
       </div>
+
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {p.options.map((o) => {
           const isMine = p.my_votes.includes(o.id);
+          const isSelected = selected.includes(o.id);
           const pct = Math.min(100, o.percent);
+          const active = isSelected || isMine;
           return (
             <button
               key={o.id}
+              type="button"
               onClick={() => toggle(o.id)}
               disabled={!canVote}
-              aria-pressed={isMine}
+              aria-pressed={active}
               style={{
-                position: "relative", textAlign: "left", border: isMine ? "1.5px solid var(--brand)" : "1px solid var(--border)",
-                background: "var(--bg-card)", borderRadius: 8, padding: "10px 14px", cursor: canVote ? "pointer" : "default",
+                position: "relative",
+                textAlign: "left",
+                border: `1px solid ${active ? "var(--brand)" : "var(--border-strong)"}`,
+                background: "var(--bg-card)",
+                borderRadius: 8,
+                padding: "10px 14px",
+                cursor: canVote ? "pointer" : "default",
                 overflow: "hidden",
               }}
             >
-              {voted && (
+              {(voted || p.expired) && (
                 <span
                   aria-hidden
                   style={{
-                    position: "absolute", inset: 0, width: `${pct}%`,
-                    background: isMine ? "var(--brand-soft)" : "var(--bg-inset)",
+                    position: "absolute",
+                    inset: 0,
+                    width: `${pct}%`,
+                    background: isMine ? "var(--brand-soft)" : "var(--bg-hover)",
                     transition: "width .3s ease",
                   }}
                 />
               )}
-              <span style={{ position: "relative", display: "flex", justifyContent: "space-between", fontSize: 14 }}>
-                <span>{isMine && "✓ "}{o.content}</span>
-                {voted && <span style={{ color: "var(--text-2)" }}>{o.percent}% · {o.votes} 票</span>}
+              <span style={{ position: "relative", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, fontSize: 13.5 }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontWeight: active ? 600 : 450 }}>
+                  {active && <IconCheck size={14} style={{ color: "var(--brand)" }} />}
+                  {o.content}
+                </span>
+                {(voted || p.expired) && (
+                  <span className="tabular-nums" style={{ color: "var(--text-2)", fontSize: 12.5 }}>
+                    {o.percent}%（{o.votes} 票）
+                  </span>
+                )}
               </span>
             </button>
           );
         })}
       </div>
+
       {canVote && (
         <button className="btn btn-primary btn-sm" style={{ marginTop: 12 }} onClick={submit} disabled={submitting || selected.length === 0}>
-          {submitting ? "投票中…" : voted ? "修改投票" : "投票"}
+          {submitting ? "提交中…" : voted ? "确认改票" : "提交投票"}
         </button>
       )}
       {!me?.authenticated && (
         <p style={{ fontSize: 13, color: "var(--text-3)", marginTop: 10 }}>
-          <a href="/login" style={{ color: "var(--brand)" }}>登录</a> 后参与投票
+          <a href="/login" style={{ color: "var(--brand)" }}>登录</a> 后即可参与投票
         </p>
       )}
     </section>

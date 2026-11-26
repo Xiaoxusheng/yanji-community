@@ -86,11 +86,22 @@ func buildTree(rows []row, viewerID int64) []Comment {
 	return roots
 }
 
-// List 评论树。
+// List 评论树（严格校验帖子与版块可见性，防非公开帖 IDOR）。
 func (s *Service) List(ctx context.Context, postPublicID string, viewerID int64, sort string, limit, offset int) ([]Comment, int64, error) {
 	ref, err := s.deps.Post.RefForComment(ctx, postPublicID)
 	if err != nil {
 		return nil, 0, err
+	}
+	canMod := false
+	if viewerID > 0 && s.deps.RBAC != nil {
+		canMod, _ = s.deps.RBAC.CanModerateCategory(ctx, viewerID, ref.CategoryID)
+	}
+	if ref.CategoryVisibility != "public" && !canMod {
+		return nil, 0, apperr.NotFound("帖子不存在")
+	}
+	isPublicStatus := ref.Status == posts.StatusPublished || ref.Status == posts.StatusLocked
+	if !isPublicStatus && viewerID != ref.AuthorID && !canMod {
+		return nil, 0, apperr.NotFound("帖子不存在")
 	}
 	rows, total, err := s.repo.ListTree(ctx, ref.ID, viewerID, sort, limit, offset)
 	if err != nil {
@@ -108,6 +119,9 @@ func (s *Service) Create(ctx context.Context, actorID int64, postPublicID string
 	ref, err := s.deps.Post.RefForComment(ctx, postPublicID)
 	if err != nil {
 		return "", "", err
+	}
+	if ref.CategoryStatus != "active" || ref.CategoryVisibility != "public" {
+		return "", "", apperr.NotFound("帖子不存在")
 	}
 	if ref.Status == posts.StatusLocked {
 		return "", "", apperr.ErrPostLocked
@@ -189,25 +203,25 @@ func (s *Service) Create(ctx context.Context, actorID int64, postPublicID string
 	}
 	defer tx.Rollback(ctx)
 
-	id, publicID, err := s.repo.InsertTx(ctx, tx, ref.ID, actorID, parentID, rootID, quoteID, depth, body, rendered)
+	id, publicID, err := s.repo.InsertTx(ctx, tx, ref.ID, actorID, parentID, rootID, quoteID, depth, body, rendered, status)
 	if err != nil {
 		return "", "", apperr.Internal(err)
 	}
-	if parentID != nil {
-		if err := s.repo.IncReplyCount(ctx, tx, *parentID, 1); err != nil {
+	// 仅公开评论更新计数、活跃度与通知；待审评论审核通过后再计入
+	if status == "published" {
+		if parentID != nil {
+			if err := s.repo.IncReplyCount(ctx, tx, *parentID, 1); err != nil {
+				return "", "", apperr.Internal(err)
+			}
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE posts SET comment_count = comment_count + 1 WHERE id = $1`, ref.ID); err != nil {
 			return "", "", apperr.Internal(err)
 		}
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE posts SET comment_count = comment_count + 1 WHERE id = $1`, ref.ID); err != nil {
-		return "", "", apperr.Internal(err)
-	}
-	if err := s.deps.Post.TouchActivity(ctx, tx, ref.ID); err != nil {
-		return "", "", apperr.Internal(err)
-	}
+		if err := s.deps.Post.TouchActivity(ctx, tx, ref.ID); err != nil {
+			return "", "", apperr.Internal(err)
+		}
 
-	// 通知：帖子作者收到评论；被回复者收到回复；@提及
-	if status == "published" {
 		mentioned, err := s.mentionUserIDs(ctx, body, actorID)
 		if err != nil {
 			return "", "", apperr.Internal(err)
@@ -255,6 +269,8 @@ func (s *Service) Create(ctx context.Context, actorID int64, postPublicID string
 	return publicID, status, tx.Commit(ctx)
 }
 
+const maxMentionsPerComment = 10
+
 func (s *Service) mentionUserIDs(ctx context.Context, body string, actorID int64) ([]int64, error) {
 	matches := mentionRe.FindAllStringSubmatch(body, -1)
 	seen := map[string]bool{}
@@ -263,6 +279,9 @@ func (s *Service) mentionUserIDs(ctx context.Context, body string, actorID int64
 		if !seen[m[1]] {
 			seen[m[1]] = true
 			names = append(names, m[1])
+			if len(names) >= maxMentionsPerComment {
+				break
+			}
 		}
 	}
 	ids, err := s.repo.ResolveMentions(ctx, names)
@@ -278,7 +297,7 @@ func (s *Service) mentionUserIDs(ctx context.Context, body string, actorID int64
 	return out, nil
 }
 
-// Update 编辑评论（作者本人）。
+// Update 编辑评论（作者本人；命中 review 敏感词转回待审并同步计数）。
 func (s *Service) Update(ctx context.Context, actorID int64, publicID, body string) error {
 	cm, err := s.repo.GetByPublicID(ctx, publicID)
 	if err != nil {
@@ -301,6 +320,10 @@ func (s *Service) Update(ctx context.Context, actorID int64, publicID, body stri
 	if action == "block" {
 		return apperr.ErrContentBlocked
 	}
+	newStatus := ""
+	if action == "review" {
+		newStatus = "pending_review"
+	}
 	rendered, err := markdown.Render(body)
 	if err != nil {
 		return apperr.Internal(err)
@@ -310,8 +333,19 @@ func (s *Service) Update(ctx context.Context, actorID int64, publicID, body stri
 		return apperr.Internal(err)
 	}
 	defer tx.Rollback(ctx)
-	if err := s.repo.UpdateTx(ctx, tx, cm.ID, body, rendered); err != nil {
+	if err := s.repo.UpdateTx(ctx, tx, cm.ID, body, rendered, newStatus); err != nil {
 		return apperr.Internal(err)
+	}
+	if newStatus == "pending_review" {
+		if _, err := tx.Exec(ctx,
+			`UPDATE posts SET comment_count = GREATEST(0, comment_count - 1) WHERE id = $1`, cm.PostID); err != nil {
+			return apperr.Internal(err)
+		}
+		if cm.ParentID != nil {
+			if err := s.repo.IncReplyCount(ctx, tx, *cm.ParentID, -1); err != nil {
+				return apperr.Internal(err)
+			}
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -356,13 +390,15 @@ func (s *Service) Delete(ctx context.Context, actor *Viewer, actorID int64, requ
 	if err := s.repo.SoftDeleteTx(ctx, tx, cm.ID); err != nil {
 		return apperr.Internal(err)
 	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE posts SET comment_count = GREATEST(0, comment_count - 1) WHERE id = $1`, cm.PostID); err != nil {
-		return apperr.Internal(err)
-	}
-	if cm.ParentID != nil {
-		if err := s.repo.IncReplyCount(ctx, tx, *cm.ParentID, -1); err != nil {
+	if cm.Status == "published" {
+		if _, err := tx.Exec(ctx,
+			`UPDATE posts SET comment_count = GREATEST(0, comment_count - 1) WHERE id = $1`, cm.PostID); err != nil {
 			return apperr.Internal(err)
+		}
+		if cm.ParentID != nil {
+			if err := s.repo.IncReplyCount(ctx, tx, *cm.ParentID, -1); err != nil {
+				return apperr.Internal(err)
+			}
 		}
 	}
 	if cm.AuthorID != actorID {

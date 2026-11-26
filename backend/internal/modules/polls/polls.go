@@ -131,16 +131,27 @@ func (s *Service) getByPost(ctx context.Context, postID int64) (*Poll, error) {
 	return &p, nil
 }
 
-// Results 投票结果（含我的投票）。
+// Results 投票结果（含我的投票；校验帖子与版块可见性防非公开帖 IDOR）。
 func (s *Service) Results(ctx context.Context, postPublicID string, viewerID int64) (*Poll, error) {
-	var postID int64
-	err := s.pool.QueryRow(ctx,
-		`SELECT id FROM posts WHERE public_id = $1 AND deleted_at IS NULL`, postPublicID).Scan(&postID)
+	var postID, authorID int64
+	var postStatus, catStatus, catVis string
+	err := s.pool.QueryRow(ctx, `
+		SELECT p.id, p.author_id, p.status, c.status, c.visibility
+		FROM posts p
+		JOIN categories c ON c.id = p.category_id
+		WHERE p.public_id = $1 AND p.deleted_at IS NULL`, postPublicID).
+		Scan(&postID, &authorID, &postStatus, &catStatus, &catVis)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperr.NotFound("帖子不存在")
 	}
 	if err != nil {
 		return nil, err
+	}
+	if catStatus != "active" || catVis != "public" {
+		return nil, apperr.NotFound("帖子不存在")
+	}
+	if postStatus != "published" && postStatus != "locked" && viewerID != authorID {
+		return nil, apperr.NotFound("帖子不存在")
 	}
 	p, err := s.getByPost(ctx, postID)
 	if err != nil {
@@ -197,8 +208,13 @@ func (s *Service) Results(ctx context.Context, postPublicID string, viewerID int
 // 并发安全：FOR UPDATE 锁定投票行 + 数据库唯一约束兜底。
 func (s *Service) Vote(ctx context.Context, userID int64, postPublicID string, optionIDs []int64) (*Poll, error) {
 	var postID int64
-	err := s.pool.QueryRow(ctx,
-		`SELECT id FROM posts WHERE public_id = $1 AND deleted_at IS NULL AND status = 'published'`, postPublicID).Scan(&postID)
+	err := s.pool.QueryRow(ctx, `
+		SELECT p.id
+		FROM posts p
+		JOIN categories c ON c.id = p.category_id
+		WHERE p.public_id = $1 AND p.deleted_at IS NULL
+		  AND p.status = 'published'
+		  AND c.status = 'active' AND c.visibility = 'public'`, postPublicID).Scan(&postID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperr.NotFound("帖子不存在")
 	}

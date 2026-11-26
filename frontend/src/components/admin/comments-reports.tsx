@@ -77,7 +77,7 @@ export function AdminCommentsPage() {
             render: (v: string, r) => (
               <div>
                 <div>{v.length > 80 ? v.slice(0, 80) + "…" : v}</div>
-                <Link href={`/p/${r.post_id}`} target="_blank" style={{ fontSize: 12, color: "#4f46e5" }}>
+                <Link href={`/p/${r.post_id}`} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: "#4f46e5" }}>
                   来自帖子：{r.post_title}
                 </Link>
               </div>

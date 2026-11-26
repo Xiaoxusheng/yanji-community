@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -102,8 +103,8 @@ const HotScoreSQL = `(
 	/ POWER(EXTRACT(EPOCH FROM (now_utc() - COALESCE(p.published_at, p.created_at))) / 3600.0 + 2, 1.2)
 )`
 
-// publicBase 公开内容基础条件。
-const publicBase = `p.status = 'published' AND p.deleted_at IS NULL AND c.status = 'active' AND c.visibility = 'public'`
+// publicBase 公开内容基础条件（已发布与锁定帖均公开可读，锁定仅限制新评论）。
+const publicBase = `p.status IN ('published', 'locked') AND p.deleted_at IS NULL AND c.status = 'active' AND c.visibility = 'public'`
 
 // FeedParams Feed 查询参数。
 type FeedParams struct {
@@ -136,6 +137,13 @@ func (r *Repo) Feed(ctx context.Context, p FeedParams) ([]postRow, int64, error)
 		if p.Tab == "featured" {
 			where += ` AND p.is_featured`
 		}
+	}
+	if p.ViewerID > 0 && p.Tab != "following" {
+		args = append(args, p.ViewerID)
+		idx := itoa(int64(len(args)))
+		where += ` AND NOT EXISTS (SELECT 1 FROM user_blocks ub
+			WHERE (ub.blocker_id = $` + idx + ` AND ub.blocked_id = p.author_id)
+			   OR (ub.blocked_id = $` + idx + ` AND ub.blocker_id = p.author_id))`
 	}
 
 	var countArgs []any
@@ -176,8 +184,15 @@ func (r *Repo) Feed(ctx context.Context, p FeedParams) ([]postRow, int64, error)
 
 // ListByCategory 版块帖子列表（置顶优先）。
 func (r *Repo) ListByCategory(ctx context.Context, categoryID int64, viewerID int64, sort string, limit, offset int) ([]postRow, int64, error) {
-	where := `p.category_id = $1 AND p.status = 'published' AND p.deleted_at IS NULL`
+	where := `p.category_id = $1 AND p.status IN ('published', 'locked') AND p.deleted_at IS NULL`
 	args := []any{categoryID}
+	if viewerID > 0 {
+		args = append(args, viewerID)
+		idx := itoa(int64(len(args)))
+		where += ` AND NOT EXISTS (SELECT 1 FROM user_blocks ub
+			WHERE (ub.blocker_id = $` + idx + ` AND ub.blocked_id = p.author_id)
+			   OR (ub.blocked_id = $` + idx + ` AND ub.blocker_id = p.author_id))`
+	}
 	order := `p.is_pinned DESC, p.published_at DESC`
 	if sort == "hot" {
 		order = `p.is_pinned DESC, ` + HotScoreSQL + ` DESC`
@@ -195,6 +210,7 @@ func (r *Repo) ListByCategory(ctx context.Context, categoryID int64, viewerID in
 		FROM posts p
 		JOIN users u ON u.id = p.author_id AND u.deleted_at IS NULL
 		JOIN user_profiles up ON up.user_id = u.id
+		JOIN categories c ON c.id = p.category_id
 		WHERE `+where+`
 		ORDER BY `+order+`
 		LIMIT $`+itoa(int64(len(args)-1))+` OFFSET $`+itoa(int64(len(args))), args...)
@@ -209,11 +225,20 @@ func (r *Repo) ListByCategory(ctx context.Context, categoryID int64, viewerID in
 // ListByTag 标签帖子列表。
 func (r *Repo) ListByTag(ctx context.Context, tagID int64, viewerID int64, limit, offset int) ([]postRow, int64, error) {
 	where := `p.id IN (SELECT post_id FROM post_tags WHERE tag_id = $1) AND ` + publicBase
+	args := []any{tagID}
+	if viewerID > 0 {
+		args = append(args, viewerID)
+		idx := itoa(int64(len(args)))
+		where += ` AND NOT EXISTS (SELECT 1 FROM user_blocks ub
+			WHERE (ub.blocker_id = $` + idx + ` AND ub.blocked_id = p.author_id)
+			   OR (ub.blocked_id = $` + idx + ` AND ub.blocker_id = p.author_id))`
+	}
 	var total int64
 	if err := r.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM posts p JOIN categories c ON c.id = p.category_id WHERE `+where, tagID).Scan(&total); err != nil {
+		`SELECT COUNT(*) FROM posts p JOIN categories c ON c.id = p.category_id WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	args = append(args, limit, offset)
 	rows, err := r.pool.Query(ctx, `
 		SELECT `+itemCols+viewerJoin(viewerID)+`, p.published_at, p.last_activity_at, p.created_at, p.edited_at
 		FROM posts p
@@ -221,7 +246,7 @@ func (r *Repo) ListByTag(ctx context.Context, tagID int64, viewerID int64, limit
 		JOIN user_profiles up ON up.user_id = u.id
 		JOIN categories c ON c.id = p.category_id
 		WHERE `+where+`
-		ORDER BY p.published_at DESC LIMIT $2 OFFSET $3`, tagID, limit, offset)
+		ORDER BY p.published_at DESC LIMIT $`+itoa(int64(len(args)-1))+` OFFSET $`+itoa(int64(len(args))), args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -230,8 +255,35 @@ func (r *Repo) ListByTag(ctx context.Context, tagID int64, viewerID int64, limit
 	return list, total, serr
 }
 
-// ListByAuthor 用户公开帖子。
+// ListByAuthor 用户公开帖子（尊重主页隐私设置与拉黑屏蔽）。
 func (r *Repo) ListByAuthor(ctx context.Context, authorID, viewerID int64, limit, offset int) ([]postRow, int64, error) {
+	if viewerID != authorID {
+		var vis string
+		if err := r.pool.QueryRow(ctx, `SELECT profile_visibility FROM user_profiles WHERE user_id = $1`, authorID).Scan(&vis); err == nil {
+			if vis == "private" {
+				return nil, 0, nil
+			}
+			if vis == "followers" {
+				if viewerID == 0 {
+					return nil, 0, nil
+				}
+				var ok bool
+				_ = r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_follows WHERE follower_id = $1 AND following_id = $2)`, viewerID, authorID).Scan(&ok)
+				if !ok {
+					return nil, 0, nil
+				}
+			}
+		}
+		if viewerID > 0 {
+			var blocked bool
+			_ = r.pool.QueryRow(ctx, `
+				SELECT EXISTS(SELECT 1 FROM user_blocks WHERE (blocker_id = $1 AND blocked_id = $2)
+				                                          OR (blocker_id = $2 AND blocked_id = $1))`, viewerID, authorID).Scan(&blocked)
+			if blocked {
+				return nil, 0, nil
+			}
+		}
+	}
 	where := `p.author_id = $1 AND ` + publicBase
 	var total int64
 	if err := r.pool.QueryRow(ctx,
@@ -285,21 +337,25 @@ func (r *Repo) GetByPublicID(ctx context.Context, publicID string, viewerID int6
 
 // GetInternalByPublicID 取内部 ID 与作者/版块（评论等模块使用）。
 type PostRef struct {
-	ID         int64
-	PublicID   string
-	AuthorID   int64
-	CategoryID int64
-	Status     string
-	Title      string
+	ID                 int64
+	PublicID           string
+	AuthorID           int64
+	CategoryID         int64
+	CategoryVisibility string
+	CategoryStatus     string
+	Status             string
+	Title              string
 }
 
-// RefForComment 评论模块用：取帖子引用（含锁定状态）。
+// RefForComment 评论模块用：取帖子引用（含锁定状态与版块可见性）。
 func (r *Repo) RefForComment(ctx context.Context, publicID string) (*PostRef, error) {
 	var ref PostRef
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, public_id::text, author_id, category_id, status, title
-		FROM posts WHERE public_id = $1 AND deleted_at IS NULL`, publicID).
-		Scan(&ref.ID, &ref.PublicID, &ref.AuthorID, &ref.CategoryID, &ref.Status, &ref.Title)
+		SELECT p.id, p.public_id::text, p.author_id, p.category_id, c.visibility, c.status, p.status, p.title
+		FROM posts p
+		JOIN categories c ON c.id = p.category_id
+		WHERE p.public_id = $1 AND p.deleted_at IS NULL`, publicID).
+		Scan(&ref.ID, &ref.PublicID, &ref.AuthorID, &ref.CategoryID, &ref.CategoryVisibility, &ref.CategoryStatus, &ref.Status, &ref.Title)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperr.NotFound("帖子不存在")
 	}
@@ -472,8 +528,12 @@ func (r *Repo) ModerateTx(ctx context.Context, tx pgx.Tx, id int64, fields map[s
 	return err
 }
 
-// AdminList 后台帖子列表（全状态）。
-func (r *Repo) AdminList(ctx context.Context, status, categorySlug, q string, limit, offset int) ([]postRow, int64, error) {
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+func escapeLike(s string) string { return likeEscaper.Replace(s) }
+
+// AdminList 后台帖子列表（全状态；allowedCategoryIDs 非 nil 时限定版块范围）。
+func (r *Repo) AdminList(ctx context.Context, status, categorySlug, q string, allowedCategoryIDs []int64, limit, offset int) ([]postRow, int64, error) {
 	where := `1=1`
 	args := []any{}
 	if status != "" {
@@ -484,9 +544,13 @@ func (r *Repo) AdminList(ctx context.Context, status, categorySlug, q string, li
 		args = append(args, categorySlug)
 		where += ` AND c.slug = $` + itoa(int64(len(args)))
 	}
+	if allowedCategoryIDs != nil {
+		args = append(args, allowedCategoryIDs)
+		where += ` AND p.category_id = ANY($` + itoa(int64(len(args))) + `)`
+	}
 	if q != "" {
-		args = append(args, "%"+q+"%")
-		where += ` AND p.title ILIKE $` + itoa(int64(len(args)))
+		args = append(args, "%"+escapeLike(q)+"%")
+		where += ` AND p.title ILIKE $` + itoa(int64(len(args))) + ` ESCAPE '\'`
 	}
 	var total int64
 	if err := r.pool.QueryRow(ctx,

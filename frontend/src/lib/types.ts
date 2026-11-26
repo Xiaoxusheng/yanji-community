@@ -59,6 +59,7 @@ export interface CommentNode {
   quote_body?: string;
   depth: number;
   author: Author;
+  body_markdown?: string;
   body_rendered: string;
   status: string;
   like_count: number;
@@ -104,6 +105,7 @@ export interface Me {
     status: string;
     sanctioned: boolean;
     sanction_type: string;
+    can_admin?: boolean;
   } | null;
 }
 
@@ -146,6 +148,10 @@ export interface ProfilePublic {
   bio: string;
   website: string;
   location: string;
+  profile_visibility?: string;
+  restricted?: boolean;
+  is_following?: boolean;
+  is_blocked?: boolean;
   created_at: string;
   post_count: number;
   comment_count: number;

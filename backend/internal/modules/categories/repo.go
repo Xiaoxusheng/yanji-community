@@ -152,10 +152,10 @@ func (r *Repo) Update(ctx context.Context, id int64, fields map[string]any) erro
 	args = append(args, id)
 	tag, err := r.pool.Exec(ctx, `UPDATE categories SET `+set+` WHERE id = $`+itoa(i), args...)
 	if err != nil {
-		if tag.RowsAffected() == 0 {
-			return apperr.NotFound("版块不存在")
-		}
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperr.NotFound("版块不存在")
 	}
 	return nil
 }

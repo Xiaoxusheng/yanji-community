@@ -3,6 +3,7 @@ package users
 import (
 	"context"
 	"log/slog"
+	"net/url"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -42,8 +43,8 @@ type UpdateSettingsRequest struct {
 func invalid(msg string) error { return apperr.BadRequest("VALIDATION_ERROR", msg) }
 
 // PublicProfile 公开资料。
-func (s *Service) PublicProfile(ctx context.Context, username string) (*PublicProfile, error) {
-	return s.repo.GetPublicProfile(ctx, username)
+func (s *Service) PublicProfile(ctx context.Context, username string, viewerID int64) (*PublicProfile, error) {
+	return s.repo.GetPublicProfile(ctx, username, viewerID)
 }
 
 // InternalIDByUsername 内部 ID。
@@ -67,7 +68,11 @@ func (s *Service) UpdateProfile(ctx context.Context, userID int64, req UpdatePro
 		fields["display_name"] = dn
 	}
 	if req.AvatarKey != nil {
-		fields["avatar_key"] = strings.TrimSpace(*req.AvatarKey)
+		ak := strings.TrimSpace(*req.AvatarKey)
+		if ak != "" && !isSafeAvatarKey(ak) {
+			return invalid("头像路径不合法")
+		}
+		fields["avatar_key"] = ak
 	}
 	if req.Bio != nil {
 		if len([]rune(*req.Bio)) > 500 {
@@ -77,8 +82,14 @@ func (s *Service) UpdateProfile(ctx context.Context, userID int64, req UpdatePro
 	}
 	if req.Website != nil {
 		w := strings.TrimSpace(*req.Website)
-		if w != "" && !strings.HasPrefix(w, "http://") && !strings.HasPrefix(w, "https://") {
-			return invalid("个人主页链接需以 http(s):// 开头")
+		if w != "" {
+			if len([]rune(w)) > 300 {
+				return invalid("个人主页链接最长 300 字符")
+			}
+			u, err := url.Parse(w)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return invalid("个人主页链接需为合法的 http(s):// 地址")
+			}
 		}
 		fields["website"] = w
 	}
@@ -125,4 +136,24 @@ func (s *Service) Followers(ctx context.Context, userID int64, limit, offset int
 // Following 关注列表。
 func (s *Service) Following(ctx context.Context, userID int64, limit, offset int) ([]FollowerRow, int64, error) {
 	return s.repo.ListFollowing(ctx, userID, limit, offset)
+}
+
+// FollowingCategories 关注的版块列表。
+func (s *Service) FollowingCategories(ctx context.Context, userID int64, limit, offset int) ([]FollowedCategoryRow, int64, error) {
+	return s.repo.ListFollowedCategories(ctx, userID, limit, offset)
+}
+
+// FollowingTags 关注的标签列表。
+func (s *Service) FollowingTags(ctx context.Context, userID int64, limit, offset int) ([]FollowedTagRow, int64, error) {
+	return s.repo.ListFollowedTags(ctx, userID, limit, offset)
+}
+
+func isSafeAvatarKey(v string) bool {
+	if len(v) > 512 || strings.Contains(v, "..") || strings.ContainsAny(v, " \t\r\n<>\"'\\") {
+		return false
+	}
+	return strings.HasPrefix(v, "uploads/") ||
+		strings.HasPrefix(v, "/files/") ||
+		strings.HasPrefix(v, "https://") ||
+		strings.HasPrefix(v, "http://")
 }

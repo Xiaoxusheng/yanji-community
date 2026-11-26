@@ -4,7 +4,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Table, Card, Input, Select, Space, Tag, Button, Drawer, Descriptions,
+  Table, Card, Input, InputNumber, Select, Space, Tag, Button, Drawer, Descriptions,
   Modal, Form, Select as AntSelect, message, Tabs, Popconfirm,
 } from "antd";
 import { api, timeAgo, type PageData } from "@/lib/api";
@@ -15,6 +15,23 @@ const statusColors: Record<string, string> = {
 };
 const sanctionColors: Record<string, string> = {
   warn: "gold", mute: "orange", post_ban: "volcano", temp_ban: "red", perma_ban: "red",
+};
+
+type AdminUserRole = {
+  id: number;
+  role_id: number;
+  role_code: string;
+  role_name: string;
+  scope_type: string;
+  scope_id: number;
+  scope_name: string;
+};
+
+type AdminUserBadge = {
+  id: number;
+  code: string;
+  name: string;
+  icon: string;
 };
 
 export default function AdminUsersPage() {
@@ -51,8 +68,9 @@ export default function AdminUsersPage() {
         bio: string;
         website: string;
         location: string;
-        roles: { id: number; role_code: string; role_name: string; scope_type: string; scope_name: string }[];
+        roles: AdminUserRole[];
         sanctions: SanctionRow[];
+        badges: AdminUserBadge[];
       }>(`/admin/users/${detail!.id}`),
   });
 
@@ -62,9 +80,13 @@ export default function AdminUsersPage() {
     queryFn: () => api.get<{ items: RoleRow[] }>("/admin/roles"),
   });
 
-  const createSanction = async (values: { sanction_type: string; reason: string; days: number }) => {
+  const createSanction = async (values: { sanction_type: string; reason: string; days?: number }) => {
     try {
-      await api.post(`/admin/users/${detail!.id}/sanctions`, values);
+      await api.post(`/admin/users/${detail!.id}/sanctions`, {
+        sanction_type: values.sanction_type,
+        reason: values.reason,
+        days: values.days ? Number(values.days) : 0,
+      });
       message.success("处罚已创建");
       setSanctionOpen(false);
       form.resetFields();
@@ -108,10 +130,20 @@ export default function AdminUsersPage() {
     }
   };
 
-  const removeRole = async (roleId: number) => {
+  const removeRole = async (roleId: number, scopeId: number) => {
     try {
-      await api.delete(`/admin/users/${detail!.id}/roles?role_id=${roleId}`);
+      await api.delete(`/admin/users/${detail!.id}/roles?role_id=${roleId}&scope_id=${scopeId}`);
       message.success("角色已移除");
+      qc.invalidateQueries({ queryKey: ["admin-user", detail?.id] });
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  };
+
+  const revokeBadge = async (badgeId: number) => {
+    try {
+      await api.delete(`/admin/users/${detail!.id}/badges/${badgeId}`);
+      message.success("勋章已收回");
       qc.invalidateQueries({ queryKey: ["admin-user", detail?.id] });
     } catch (e) {
       message.error((e as Error).message);
@@ -212,17 +244,35 @@ export default function AdminUsersPage() {
                 children: (
                   <Space direction="vertical" style={{ width: "100%" }}>
                     {detailData.data.roles.map((r) => (
-                      <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div key={`${r.id}-${r.role_id}-${r.scope_id}`} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                         <Tag color="blue">{r.role_name}</Tag>
                         <span style={{ color: "#999", fontSize: 13 }}>
-                          {r.scope_type === "category" ? `范围：${r.scope_name}` : "全局"}
+                          {r.scope_type === "category" ? `范围：${r.scope_name || `#${r.scope_id}`}` : "全局"}
                         </span>
-                        <Popconfirm title="移除该角色？" onConfirm={() => removeRole(r.id)}>
+                        <Popconfirm title="移除该角色？" onConfirm={() => removeRole(r.role_id, r.scope_id)}>
                           <Button size="small" type="text" danger>移除</Button>
                         </Popconfirm>
                       </div>
                     ))}
                     {detailData.data.roles.length === 0 && <span style={{ color: "#999" }}>暂无角色</span>}
+                  </Space>
+                ),
+              },
+              {
+                key: "badges",
+                label: `勋章 (${detailData.data.badges.length})`,
+                children: (
+                  <Space direction="vertical" style={{ width: "100%" }}>
+                    {detailData.data.badges.map((b) => (
+                      <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <Tag color="gold">{b.icon} {b.name}</Tag>
+                        <span style={{ color: "#999", fontSize: 12 }}>{b.code}</span>
+                        <Popconfirm title={`收回勋章「${b.name}」？`} onConfirm={() => revokeBadge(b.id)}>
+                          <Button size="small" type="text" danger>收回</Button>
+                        </Popconfirm>
+                      </div>
+                    ))}
+                    {detailData.data.badges.length === 0 && <span style={{ color: "#999" }}>暂无勋章</span>}
                   </Space>
                 ),
               },
@@ -321,7 +371,7 @@ export default function AdminUsersPage() {
             {({ getFieldValue }) =>
               getFieldValue("sanction_type") === "temp_ban" ? (
                 <Form.Item name="days" label="封禁天数" rules={[{ required: true, message: "请输入天数" }]}>
-                  <Input type="number" min={1} placeholder="如 7" />
+                  <InputNumber min={1} style={{ width: "100%" }} placeholder="如 7" />
                 </Form.Item>
               ) : null
             }
@@ -332,14 +382,31 @@ export default function AdminUsersPage() {
         </Form>
       </Modal>
 
-      <Modal title="授予角色" open={roleOpen} onCancel={() => setRoleOpen(false)} onOk={() => roleForm.submit()} okText="授予">
-        <Form form={roleForm} layout="vertical" onFinish={assignRole}>
+      <Modal
+        title="授予角色"
+        open={roleOpen}
+        onCancel={() => { setRoleOpen(false); roleForm.resetFields(); }}
+        onOk={() => roleForm.submit()}
+        okText="授予"
+      >
+        <Form
+          form={roleForm}
+          layout="vertical"
+          onFinish={(v) => {
+            const role = (roles.data?.items ?? []).find((r) => r.id === v.role_id);
+            const payload = role?.code === "moderator"
+              ? { role_id: v.role_id, scope: "category", category_id: v.category_id }
+              : { role_id: v.role_id, scope: "global" };
+            return assignRole(payload);
+          }}
+        >
           <Form.Item name="role_id" label="角色" rules={[{ required: true, message: "请选择角色" }]}>
             <AntSelect
               placeholder="选择角色"
               options={(roles.data?.items ?? []).map((r) => ({
-                value: r.id, label: `${r.name}（${r.code}）`,
-                disabled: ["admin", "superadmin"].includes(r.code) && !r.is_system === false && r.code === "superadmin",
+                value: r.id,
+                label: `${r.name}（${r.code}）`,
+                disabled: r.code === "superadmin",
               }))}
             />
           </Form.Item>
@@ -347,14 +414,10 @@ export default function AdminUsersPage() {
             {({ getFieldValue }) => {
               const role = (roles.data?.items ?? []).find((r) => r.id === getFieldValue("role_id"));
               return role?.code === "moderator" ? (
-                <Form.Item name="scope" label="授权范围" rules={[{ required: true, message: "版主必须选择授权版块" }]}>
+                <Form.Item name="category_id" label="授权版块" rules={[{ required: true, message: "版主必须选择授权版块" }]}>
                   <CategorySelect />
                 </Form.Item>
-              ) : (
-                <Form.Item name="scope" hidden initialValue="global">
-                  <Input />
-                </Form.Item>
-              );
+              ) : null;
             }}
           </Form.Item>
         </Form>

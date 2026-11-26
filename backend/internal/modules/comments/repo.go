@@ -31,6 +31,7 @@ type Comment struct {
 	QuoteBody    string     `json:"quote_body,omitempty"`
 	Depth        int        `json:"depth"`
 	Author       Author     `json:"author"`
+	BodyMarkdown string     `json:"body_markdown,omitempty"` // 仅作者本人返回，供无损编辑
 	BodyRendered string     `json:"body_rendered"`
 	Status       string     `json:"status"`
 	LikeCount    int64      `json:"like_count"`
@@ -71,6 +72,7 @@ type row struct {
 	AuthorName    string
 	AuthorDisplay string
 	AuthorAvatar  string
+	BodyMarkdown  string
 	BodyRendered  string
 	Status        string
 	LikeCount     int64
@@ -81,10 +83,11 @@ type row struct {
 }
 
 const cols = `cm.id, cm.public_id::text, cm.post_id, cm.root_id, cm.parent_id, cm.quote_comment_id,
-	COALESCE(qa.username, ''), COALESCE(q.body_markdown, ''),
+	COALESCE(qa.username, ''),
+	CASE WHEN q.status = 'published' THEN COALESCE(q.body_markdown, '') ELSE '' END,
 	cm.depth, cm.author_id, u.public_id::text, u.username,
 	COALESCE(up.display_name, u.username), up.avatar_key,
-	cm.body_rendered, cm.status, cm.like_count, cm.reply_count, cm.is_accepted_answer, cm.created_at, cm.edited_at`
+	cm.body_markdown, cm.body_rendered, cm.status, cm.like_count, cm.reply_count, cm.is_accepted_answer, cm.created_at, cm.edited_at`
 
 const joins = `FROM comments cm
 	JOIN users u ON u.id = cm.author_id AND u.deleted_at IS NULL
@@ -93,10 +96,14 @@ const joins = `FROM comments cm
 	LEFT JOIN users qa ON qa.id = q.author_id`
 
 func (r *row) toComment(viewerID int64, postAuthorID int64) Comment {
+	bodyRendered := r.BodyRendered
+	if r.Status == "deleted" || r.Status == "hidden" {
+		bodyRendered = ""
+	}
 	c := Comment{
 		ID: r.PublicID, Depth: r.Depth,
 		Author:       Author{ID: r.AuthorPID, Username: r.AuthorName, DisplayName: r.AuthorDisplay, AvatarKey: r.AuthorAvatar},
-		BodyRendered: r.BodyRendered, Status: r.Status,
+		BodyRendered: bodyRendered, Status: r.Status,
 		LikeCount: r.LikeCount, ReplyCount: r.ReplyCount, Accepted: r.Accepted,
 		CreatedAt: r.CreatedAt, EditedAt: r.EditedAt,
 	}
@@ -112,6 +119,9 @@ func (r *row) toComment(viewerID int64, postAuthorID int64) Comment {
 	}
 	if viewerID > 0 {
 		c.IsAuthor = r.AuthorID == viewerID
+		if c.IsAuthor && r.Status == "published" {
+			c.BodyMarkdown = r.BodyMarkdown
+		}
 	}
 	return c
 }
@@ -156,7 +166,7 @@ func (r *Repo) ListTree(ctx context.Context, postID int64, viewerID int64, sort 
 		var cm row
 		if err := rows.Scan(&cm.ID, &cm.PublicID, &cm.PostID, &cm.RootID, &cm.ParentID, &cm.QuoteID,
 			&cm.QuoteAuthor, &cm.QuoteBody, &cm.Depth, &cm.AuthorID, &cm.AuthorPID, &cm.AuthorName,
-			&cm.AuthorDisplay, &cm.AuthorAvatar, &cm.BodyRendered, &cm.Status, &cm.LikeCount,
+			&cm.AuthorDisplay, &cm.AuthorAvatar, &cm.BodyMarkdown, &cm.BodyRendered, &cm.Status, &cm.LikeCount,
 			&cm.ReplyCount, &cm.Accepted, &cm.CreatedAt, &cm.EditedAt); err != nil {
 			return nil, 0, err
 		}
@@ -185,7 +195,7 @@ func (r *Repo) ListTree(ctx context.Context, postID int64, viewerID int64, sort 
 		var cm row
 		if err := replyRows.Scan(&cm.ID, &cm.PublicID, &cm.PostID, &cm.RootID, &cm.ParentID, &cm.QuoteID,
 			&cm.QuoteAuthor, &cm.QuoteBody, &cm.Depth, &cm.AuthorID, &cm.AuthorPID, &cm.AuthorName,
-			&cm.AuthorDisplay, &cm.AuthorAvatar, &cm.BodyRendered, &cm.Status, &cm.LikeCount,
+			&cm.AuthorDisplay, &cm.AuthorAvatar, &cm.BodyMarkdown, &cm.BodyRendered, &cm.Status, &cm.LikeCount,
 			&cm.ReplyCount, &cm.Accepted, &cm.CreatedAt, &cm.EditedAt); err != nil {
 			return nil, 0, err
 		}
@@ -202,7 +212,7 @@ func (r *Repo) GetByPublicID(ctx context.Context, publicID string) (*row, error)
 	err := r.pool.QueryRow(ctx, `SELECT `+cols+` `+joins+` WHERE cm.public_id = $1`, publicID).
 		Scan(&cm.ID, &cm.PublicID, &cm.PostID, &cm.RootID, &cm.ParentID, &cm.QuoteID,
 			&cm.QuoteAuthor, &cm.QuoteBody, &cm.Depth, &cm.AuthorID, &cm.AuthorPID, &cm.AuthorName,
-			&cm.AuthorDisplay, &cm.AuthorAvatar, &cm.BodyRendered, &cm.Status, &cm.LikeCount,
+			&cm.AuthorDisplay, &cm.AuthorAvatar, &cm.BodyMarkdown, &cm.BodyRendered, &cm.Status, &cm.LikeCount,
 			&cm.ReplyCount, &cm.Accepted, &cm.CreatedAt, &cm.EditedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperr.NotFound("评论不存在")
@@ -213,20 +223,29 @@ func (r *Repo) GetByPublicID(ctx context.Context, publicID string) (*row, error)
 	return &cm, nil
 }
 
-// InsertTx 事务内创建评论，返回 id + public_id。
-func (r *Repo) InsertTx(ctx context.Context, tx pgx.Tx, postID, authorID int64, parentID, rootID, quoteID *int64, depth int, bodyMarkdown, rendered string) (int64, string, error) {
+// InsertTx 事务内创建评论（显式落盘审核状态），返回 id + public_id。
+func (r *Repo) InsertTx(ctx context.Context, tx pgx.Tx, postID, authorID int64, parentID, rootID, quoteID *int64, depth int, bodyMarkdown, rendered, status string) (int64, string, error) {
+	if status == "" {
+		status = "published"
+	}
 	var id int64
 	var publicID string
 	err := tx.QueryRow(ctx, `
-		INSERT INTO comments (post_id, author_id, parent_id, root_id, quote_comment_id, depth, body_markdown, body_rendered)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO comments (post_id, author_id, parent_id, root_id, quote_comment_id, depth, body_markdown, body_rendered, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id, public_id::text`,
-		postID, authorID, parentID, rootID, quoteID, depth, bodyMarkdown, rendered).Scan(&id, &publicID)
+		postID, authorID, parentID, rootID, quoteID, depth, bodyMarkdown, rendered, status).Scan(&id, &publicID)
 	return id, publicID, err
 }
 
-// UpdateTx 编辑评论。
-func (r *Repo) UpdateTx(ctx context.Context, tx pgx.Tx, id int64, bodyMarkdown, rendered string) error {
+// UpdateTx 编辑评论（newStatus 非空时同步更新审核状态）。
+func (r *Repo) UpdateTx(ctx context.Context, tx pgx.Tx, id int64, bodyMarkdown, rendered, newStatus string) error {
+	if newStatus != "" {
+		_, err := tx.Exec(ctx, `
+			UPDATE comments SET body_markdown = $2, body_rendered = $3, status = $4, edited_at = now_utc(), updated_at = now_utc()
+			WHERE id = $1`, id, bodyMarkdown, rendered, newStatus)
+		return err
+	}
 	_, err := tx.Exec(ctx, `
 		UPDATE comments SET body_markdown = $2, body_rendered = $3, edited_at = now_utc(), updated_at = now_utc()
 		WHERE id = $1`, id, bodyMarkdown, rendered)

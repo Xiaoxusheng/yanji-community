@@ -74,8 +74,11 @@ func (s *AnswerService) Accept(ctx context.Context, actorID int64, commentPublic
 	var postType, postStatus string
 	var title string
 	if err := s.pool.QueryRow(ctx, `
-		SELECT author_id, post_type, status, title FROM posts WHERE id = $1`, postID).
+		SELECT author_id, post_type, status, title FROM posts WHERE id = $1 AND deleted_at IS NULL`, postID).
 		Scan(&postAuthor, &postType, &postStatus, &title); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apperr.NotFound("帖子不存在")
+		}
 		return apperr.Internal(err)
 	}
 	if postType != posts.TypeQuestion {
@@ -110,7 +113,7 @@ func (s *AnswerService) Accept(ctx context.Context, actorID int64, commentPublic
 		return apperr.BadRequest("VALIDATION_ERROR", "仅顶层评论可被采纳")
 	}
 	if s.points != nil {
-		_ = s.points.RewardAnswerAccepted(ctx, tx, commentID, commentAuthor)
+		_ = s.points.RewardAnswerAccepted(ctx, tx, postID, commentID, commentAuthor)
 		_ = s.points.AwardBadgeTx(ctx, tx, commentAuthor, "first_answer", 0)
 	}
 	_ = notifications.EmitTx(ctx, tx, notifications.Payload{

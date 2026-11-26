@@ -175,6 +175,9 @@ func (s *Service) Handle(ctx context.Context, adminID int64, appealID int64, acc
 	if status != "pending" {
 		return apperr.Conflict("CONFLICT", "该申诉已处理")
 	}
+	if userID == adminID {
+		return apperr.Forbidden("不能审批自己的申诉")
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return apperr.Internal(err)
@@ -193,20 +196,32 @@ func (s *Service) Handle(ctx context.Context, adminID int64, appealID int64, acc
 	if tag.RowsAffected() == 0 {
 		return apperr.Conflict("CONFLICT", "该申诉已处理")
 	}
-	// 申诉成立且目标为处罚 → 解除处罚（历史保留，处罚记录状态置 lifted）
+	// 申诉成立且目标为处罚 → 解除对应处罚，且仅在不存在其他生效封禁处罚时才恢复账号状态
 	if accepted && targetType == "sanction" {
 		if err := s.sanc.Lift(ctx, tx, targetID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE users SET status = 'active'
-			WHERE id = $1 AND status IN ('banned','suspended')`, userID); err != nil {
+		var stillBanned bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM user_sanctions
+				WHERE user_id = $1 AND status = 'active'
+				  AND sanction_type IN ('perma_ban', 'temp_ban')
+				  AND (ends_at IS NULL OR ends_at > now_utc())
+			)`, userID).Scan(&stillBanned); err != nil {
 			return apperr.Internal(err)
+		}
+		if !stillBanned {
+			if _, err := tx.Exec(ctx, `
+				UPDATE users SET status = 'active'
+				WHERE id = $1 AND status IN ('banned','suspended')`, userID); err != nil {
+				return apperr.Internal(err)
+			}
 		}
 	}
 	s.audit.LogInTx(ctx, tx, moderation.Detail{
 		Action: "appeal.handle", TargetType: "appeal", TargetID: appealID,
-		ActorID: adminID, RequestID: ctxRequestId(ctx), Note: newStatus + " / " + note,
+		ActorID: adminID, RequestID: ctxRequestId(ctx), IP: ctxClientIP(ctx), Note: newStatus + " / " + note,
 	})
 	_ = notifications.EmitTx(ctx, tx, notifications.Payload{
 		RecipientID: userID, ActorID: adminID, Type: notifications.TypeModeration,
@@ -217,9 +232,22 @@ func (s *Service) Handle(ctx context.Context, adminID int64, appealID int64, acc
 	return tx.Commit(ctx)
 }
 
-// ctxReqID 从 gin ctx 取（由 handler 传入 request_id 更可靠，这里兜底）。
+type ctxKey string
+
+const (
+	ctxKeyRequestID ctxKey = "request_id"
+	ctxKeyClientIP  ctxKey = "client_ip"
+)
+
 func ctxRequestId(ctx context.Context) string {
-	if v, ok := ctx.Value("request_id").(string); ok {
+	if v, ok := ctx.Value(ctxKeyRequestID).(string); ok {
+		return v
+	}
+	return ""
+}
+
+func ctxClientIP(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxKeyClientIP).(string); ok {
 		return v
 	}
 	return ""
@@ -356,7 +384,8 @@ func (h *Handler) Handle(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
-	ctx = context.WithValue(ctx, "request_id", c.GetString("request_id"))
+	ctx = context.WithValue(ctx, ctxKeyRequestID, c.GetString("request_id"))
+	ctx = context.WithValue(ctx, ctxKeyClientIP, c.ClientIP())
 	if err := h.svc.Handle(ctx, u.ID, id, req.Accepted, req.Note); err != nil {
 		respond.Fail(c, err)
 		return

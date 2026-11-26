@@ -147,9 +147,9 @@ func (s *Service) Detail(ctx context.Context, publicID string, viewer *Viewer) (
 		return nil, apperr.NotFound("帖子不存在")
 	}
 
-	// 状态可见性：非公开状态仅作者与可管理者可见
+	// 状态可见性：已发布与锁定帖公开可读，其余非公开状态仅作者与可管理者可见
 	isAuthor := viewer.UserID == row.AuthorID
-	if !isAuthor && row.Status != StatusPublished {
+	if !isAuthor && row.Status != StatusPublished && row.Status != StatusLocked {
 		if !canViewPrivate {
 			return nil, apperr.NotFound("帖子不存在")
 		}
@@ -262,7 +262,7 @@ func (s *Service) Create(ctx context.Context, authorID int64, authorName string,
 		return "", "", apperr.ErrForbidden
 	}
 	if cat.PostingPolicy == "staff_only" {
-		ok, err := s.deps.RBAC.HasPermission(ctx, authorID, "post.moderate")
+		ok, err := s.deps.RBAC.CanModerateCategory(ctx, authorID, cat.ID)
 		if err != nil {
 			return "", "", apperr.Internal(err)
 		}
@@ -383,9 +383,15 @@ func (s *Service) Update(ctx context.Context, actor *Viewer, actorID int64, publ
 	fields := map[string]any{
 		"title": newTitle, "body_markdown": newBody, "body_rendered": rendered, "excerpt": excerpt,
 	}
-	// 被隐藏/驳回的帖子编辑后重新进入待审核
+	// 被隐藏/驳回的帖子或编辑后命中 review 敏感词的非草稿帖子重新进入待审核
+	demoteToReview := false
 	if row.Status == StatusHidden || row.Status == StatusRejected {
 		fields["status"] = StatusPendingReview
+	} else if action == "review" && row.Status != StatusDraft {
+		fields["status"] = StatusPendingReview
+		if row.Status == StatusPublished || row.Status == StatusLocked {
+			demoteToReview = true
+		}
 	}
 
 	tx, err := s.deps.Pool.Begin(ctx)
@@ -395,6 +401,12 @@ func (s *Service) Update(ctx context.Context, actor *Viewer, actorID int64, publ
 	defer tx.Rollback(ctx)
 	if err := s.repo.UpdateTx(ctx, tx, row.ID, fields); err != nil {
 		return apperr.Internal(err)
+	}
+	if demoteToReview {
+		if _, err := tx.Exec(ctx,
+			`UPDATE categories SET post_count = GREATEST(0, post_count - 1) WHERE id = $1`, row.CategoryID); err != nil {
+			return apperr.Internal(err)
+		}
 	}
 	if err := s.repo.SaveRevision(ctx, tx, row.ID, actorID, newTitle, newBody, editReason); err != nil {
 		return apperr.Internal(err)
@@ -480,7 +492,7 @@ func (s *Service) Delete(ctx context.Context, actor *Viewer, actorID int64, publ
 		`UPDATE posts SET deleted_at = now_utc() WHERE id = $1`, row.ID); err != nil {
 		return apperr.Internal(err)
 	}
-	if row.Status == StatusPublished {
+	if row.Status == StatusPublished || row.Status == StatusLocked {
 		if _, err := tx.Exec(ctx,
 			`UPDATE categories SET post_count = GREATEST(0, post_count - 1) WHERE id = $1`, row.CategoryID); err != nil {
 			return apperr.Internal(err)
@@ -511,7 +523,7 @@ func (s *Service) Revisions(ctx context.Context, actor *Viewer, actorID int64, p
 // RecordView 浏览计数（Redis 去重，1h 窗口）。
 func (s *Service) RecordView(ctx context.Context, postPublicID string, viewerKey string) {
 	row, err := s.repo.GetByPublicID(ctx, postPublicID, 0)
-	if err != nil || row.Status != StatusPublished {
+	if err != nil || (row.Status != StatusPublished && row.Status != StatusLocked) {
 		return
 	}
 	if s.deps.Redis != nil {

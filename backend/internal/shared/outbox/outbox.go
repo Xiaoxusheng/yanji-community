@@ -126,6 +126,12 @@ func (d *Dispatcher) processOnce(ctx context.Context) {
 
 func (d *Dispatcher) finish(ctx context.Context, e event, err error) {
 	if err == nil {
+		// 对含一次性明文令牌的邮件事件，投递完成后立即脱敏擦除 payload，防止数据库长期留存明文 token
+		if e.eventType == "email.verification" || e.eventType == "email.password_reset" {
+			_, _ = d.pool.Exec(ctx,
+				`UPDATE outbox_events SET status='done', processed_at=now_utc(), last_error='', payload='{"redacted":true}'::jsonb WHERE id=$1`, e.id)
+			return
+		}
 		_, _ = d.pool.Exec(ctx,
 			`UPDATE outbox_events SET status='done', processed_at=now_utc(), last_error='' WHERE id=$1`, e.id)
 		return

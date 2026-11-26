@@ -1,8 +1,8 @@
 "use client";
 
-// 极简 Toast：操作成功/失败反馈（前台不引入重型组件库）。
+// 轻量 Toast 反馈组件（SVG 图标 + 胶囊毛玻璃浮层 + 微动效）。
 import { create } from "zustand";
-import { useEffect } from "react";
+import { IconAlert, IconCheckCircle } from "@/components/ui/Icons";
 
 type ToastKind = "success" | "error" | "info";
 interface ToastItem {
@@ -33,22 +33,21 @@ export function toast(kind: ToastKind, text: string) {
   useToast.getState().push(kind, text);
 }
 
-const colors: Record<ToastKind, string> = {
-  success: "var(--success)",
-  error: "var(--danger)",
-  info: "var(--info)",
+const tones: Record<ToastKind, { fg: string; bg: string }> = {
+  success: { fg: "var(--success)", bg: "var(--success-soft)" },
+  error: { fg: "var(--danger)", bg: "var(--danger-soft)" },
+  info: { fg: "var(--brand)", bg: "var(--brand-soft)" },
 };
 
 export function ToastHost() {
   const items = useToast((s) => s.items);
   const remove = useToast((s) => s.remove);
-  useEffect(() => {}, [items]);
   if (items.length === 0) return null;
   return (
     <div
       style={{
         position: "fixed",
-        top: 16,
+        top: 18,
         left: "50%",
         transform: "translateX(-50%)",
         zIndex: 9999,
@@ -56,6 +55,7 @@ export function ToastHost() {
         flexDirection: "column",
         gap: 8,
         alignItems: "center",
+        pointerEvents: "none",
       }}
       role="status"
       aria-live="polite"
@@ -64,21 +64,37 @@ export function ToastHost() {
         <div
           key={t.id}
           onClick={() => remove(t.id)}
-          className="card"
+          className="card surface-glass toast-item"
           style={{
-            padding: "10px 18px",
+            padding: "9px 15px 9px 11px",
+            borderRadius: 999,
             display: "flex",
-            gap: 8,
+            gap: 9,
             alignItems: "center",
-            fontSize: 14,
+            fontSize: 13.5,
+            fontWeight: 550,
             boxShadow: "var(--shadow-pop)",
             cursor: "pointer",
-            borderLeft: `3px solid ${colors[t.kind]}`,
-            maxWidth: 420,
+            maxWidth: 440,
+            pointerEvents: "auto",
           }}
         >
-          <span style={{ color: colors[t.kind] }}>●</span>
-          {t.text}
+          <span
+            style={{
+              color: tones[t.kind].fg,
+              background: tones[t.kind].bg,
+              width: 24,
+              height: 24,
+              borderRadius: 999,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            {t.kind === "success" ? <IconCheckCircle size={15} /> : <IconAlert size={15} />}
+          </span>
+          <span>{t.text}</span>
         </div>
       ))}
     </div>

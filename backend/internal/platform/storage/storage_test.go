@@ -1,6 +1,10 @@
 package storage
 
 import (
+	"bytes"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -63,10 +67,69 @@ func TestLocalStoragePathTraversal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := ls.LocalPath("../../etc/passwd"); ok {
-		t.Fatal("路径穿越未被阻断")
+	for _, bad := range []string{
+		"../../etc/passwd",
+		"a/../../b",
+		"/etc/passwd",
+		`uploads\..\..\secret.png`,
+		"uploads/bad\x00.png",
+	} {
+		if _, ok := ls.LocalPath(bad); ok {
+			t.Fatalf("路径穿越变体未被阻断: %q", bad)
+		}
 	}
-	if _, ok := ls.LocalPath("a/../../b"); ok {
-		t.Fatal("路径穿越未被阻断")
+}
+
+func makeFileHeader(t *testing.T, filename string, data []byte) *multipart.FileHeader {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	_ = mw.Close()
+	req := httptest.NewRequest(http.MethodPost, "/upload", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if err := req.ParseMultipartForm(4 << 20); err != nil {
+		t.Fatal(err)
+	}
+	return req.MultipartForm.File["file"][0]
+}
+
+func TestValidateImageStrictSecurity(t *testing.T) {
+	validPNG := append([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, make([]byte, 32)...)
+
+	// 1. 合法 8 字节 PNG 头通过
+	ext, err := ValidateImage(makeFileHeader(t, "avatar.png", validPNG), 1024)
+	if err != nil || ext != ".png" {
+		t.Fatalf("合法 PNG 应通过校验，got ext=%q err=%v", ext, err)
+	}
+
+	// 2. 截断为 4 字节的伪造 PNG 被拒绝（严格 8 字节魔数）
+	shortPNG := []byte{0x89, 'P', 'N', 'G', 'X', 'Y', 'Z', '0'}
+	if _, err := ValidateImage(makeFileHeader(t, "fake.png", shortPNG), 1024); err == nil {
+		t.Fatal("仅匹配前 4 字节的伪造 PNG 应被拒绝")
+	}
+
+	// 3. 危险扩展名（SVG / HTML / PHP / 双扩展名）全部拒绝
+	for _, name := range []string{"xss.svg", "page.html", "shell.php", "avatar.png.php"} {
+		if _, err := ValidateImage(makeFileHeader(t, name, validPNG), 1024); err == nil {
+			t.Fatalf("非白名单扩展名 %q 应被拒绝", name)
+		}
+	}
+
+	// 4. 伪装为 .png 的 HTML/SVG 多态内容被魔数校验拒绝
+	htmlAsPNG := []byte("<html><script>alert(1)</script></html>")
+	if _, err := ValidateImage(makeFileHeader(t, "evil.png", htmlAsPNG), 1024); err == nil {
+		t.Fatal("HTML 内容伪装为 .png 应被魔数校验拦截")
+	}
+
+	// 5. 超大体积文件被拒绝
+	if _, err := ValidateImage(makeFileHeader(t, "big.png", validPNG), 16); err == nil {
+		t.Fatal("超过 maxBytes 限制的文件应被拒绝")
 	}
 }

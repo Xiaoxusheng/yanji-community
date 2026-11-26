@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -13,28 +14,55 @@ import (
 // Handler 认证 HTTP 层。
 type Handler struct {
 	svc          *Service
+	captcha      CaptchaVerifier
 	cookieDomain string
 	cookieSecure bool
+	canAdmin     func(ctx context.Context, userID int64) bool
 }
 
 // NewHandler 构造。
 func NewHandler(svc *Service, cookieDomain string, cookieSecure bool) *Handler {
-	return &Handler{svc: svc, cookieDomain: cookieDomain, cookieSecure: cookieSecure}
+	return &Handler{
+		svc:          svc,
+		captcha:      NewCaptchaStore(nil),
+		cookieDomain: cookieDomain,
+		cookieSecure: cookieSecure,
+	}
 }
 
-// SetSessionCookie 写入会话 Cookie（HttpOnly + SameSite=Lax，生产 Secure）。
-func (h *Handler) SetSessionCookie(c *gin.Context, token string, maxAge int) {
-	c.SetCookie(CookieName, token, maxAge, "/", h.cookieDomain, h.cookieSecure, true)
-	if !h.cookieSecure {
-		c.SetSameSite(http.SameSiteLaxMode)
-	} else {
-		c.SetSameSite(http.SameSiteLaxMode)
+// SetCaptcha 注入图形验证码验证器。
+func (h *Handler) SetCaptcha(v CaptchaVerifier) {
+	if v != nil {
+		h.captcha = v
 	}
+}
+
+// SetCanAdmin 注入后台入口权限判断回调（仅用于 UI 显隐，安全校验由 RBAC 中间件负责）。
+func (h *Handler) SetCanAdmin(fn func(ctx context.Context, userID int64) bool) { h.canAdmin = fn }
+
+// SetSessionCookie 写入会话 Cookie（HttpOnly + SameSite=Lax，生产 Secure）。
+// 注意：Gin 必须在 c.SetCookie 之前调用 c.SetSameSite 才能将 SameSite 写入响应头。
+func (h *Handler) SetSessionCookie(c *gin.Context, token string, maxAge int) {
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(CookieName, token, maxAge, "/", h.cookieDomain, h.cookieSecure, true)
 }
 
 // ClearSessionCookie 清除会话 Cookie。
 func (h *Handler) ClearSessionCookie(c *gin.Context) {
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(CookieName, "", -1, "/", h.cookieDomain, h.cookieSecure, true)
+}
+
+// Captcha GET /auth/captcha —— 生成一次性图形验证码。
+func (h *Handler) Captcha(c *gin.Context) {
+	ch, err := h.captcha.Generate(c.Request.Context())
+	if err != nil {
+		respond.Fail(c, err)
+		return
+	}
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	respond.OK(c, ch)
 }
 
 // CurrentToken 从 Cookie 取会话 token。
@@ -44,9 +72,11 @@ func CurrentToken(c *gin.Context) string {
 }
 
 type registerReq struct {
-	Username string `json:"username"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Username    string `json:"username"`
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	CaptchaID   string `json:"captcha_id"`
+	CaptchaCode string `json:"captcha_code"`
 }
 
 // Register POST /auth/register
@@ -56,7 +86,13 @@ func (h *Handler) Register(c *gin.Context) {
 		respond.Fail(c, apperr.BadRequest("VALIDATION_ERROR", "请输入注册信息"))
 		return
 	}
-	if err := h.svc.Register(c.Request.Context(), RegisterRequest(req)); err != nil {
+	if err := h.captcha.Verify(c.Request.Context(), req.CaptchaID, req.CaptchaCode); err != nil {
+		respond.Fail(c, err)
+		return
+	}
+	if err := h.svc.Register(c.Request.Context(), RegisterRequest{
+		Username: req.Username, Email: req.Email, Password: req.Password,
+	}); err != nil {
 		respond.Fail(c, err)
 		return
 	}
@@ -64,15 +100,21 @@ func (h *Handler) Register(c *gin.Context) {
 }
 
 type loginReq struct {
-	Account  string `json:"account"`
-	Password string `json:"password"`
+	Account     string `json:"account"`
+	Password    string `json:"password"`
+	CaptchaID   string `json:"captcha_id"`
+	CaptchaCode string `json:"captcha_code"`
 }
 
 // Login POST /auth/login
 func (h *Handler) Login(c *gin.Context) {
 	var req loginReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		respond.Fail(c, apperr.BadRequest("VALIDATION_ERROR", "请输入账号与密码"))
+		respond.Fail(c, apperr.BadRequest("VALIDATION_ERROR", "请输入账号、密码与验证码"))
+		return
+	}
+	if err := h.captcha.Verify(c.Request.Context(), req.CaptchaID, req.CaptchaCode); err != nil {
+		respond.Fail(c, err)
 		return
 	}
 	token, err := h.svc.Login(c.Request.Context(), LoginRequest{
@@ -111,12 +153,18 @@ func (h *Handler) LogoutAll(c *gin.Context) {
 	respond.OK(c, gin.H{"message": "已退出全部设备"})
 }
 
-// Me GET /auth/me —— 游客返回 authenticated:false。
+// Me GET /auth/me —— 游客返回 authenticated:false（禁止缓存敏感账号信息）。
 func (h *Handler) Me(c *gin.Context) {
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
+	c.Header("Pragma", "no-cache")
 	u := httpx.CurrentUser(c)
 	if u == nil {
 		respond.OK(c, gin.H{"authenticated": false, "user": nil})
 		return
+	}
+	canAdmin := false
+	if h.canAdmin != nil {
+		canAdmin = h.canAdmin(c.Request.Context(), u.ID)
 	}
 	respond.OK(c, gin.H{
 		"authenticated": true,
@@ -128,6 +176,7 @@ func (h *Handler) Me(c *gin.Context) {
 			"status":         u.Status,
 			"sanctioned":     u.Muted(),
 			"sanction_type":  u.SanctionType,
+			"can_admin":      canAdmin,
 		},
 	})
 }
@@ -165,14 +214,20 @@ func (h *Handler) ResendVerification(c *gin.Context) {
 }
 
 type forgotReq struct {
-	Email string `json:"email"`
+	Email       string `json:"email"`
+	CaptchaID   string `json:"captcha_id"`
+	CaptchaCode string `json:"captcha_code"`
 }
 
 // ForgotPassword POST /auth/password/forgot
 func (h *Handler) ForgotPassword(c *gin.Context) {
 	var req forgotReq
 	if err := c.ShouldBindJSON(&req); err != nil || req.Email == "" {
-		respond.Fail(c, apperr.BadRequest("VALIDATION_ERROR", "请输入注册邮箱"))
+		respond.Fail(c, apperr.BadRequest("VALIDATION_ERROR", "请输入注册邮箱与验证码"))
+		return
+	}
+	if err := h.captcha.Verify(c.Request.Context(), req.CaptchaID, req.CaptchaCode); err != nil {
+		respond.Fail(c, err)
 		return
 	}
 	// 防枚举：一律返回成功
@@ -181,6 +236,34 @@ func (h *Handler) ForgotPassword(c *gin.Context) {
 		return
 	}
 	respond.OK(c, gin.H{"message": "如该邮箱已注册，将收到密码重置邮件"})
+}
+
+type changePwdReq struct {
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password"`
+}
+
+// ChangePassword POST /auth/password/change —— 需登录，验证原密码并轮换会话。
+func (h *Handler) ChangePassword(c *gin.Context) {
+	u := httpx.CurrentUser(c)
+	if u == nil {
+		respond.Fail(c, apperr.ErrUnauthenticated)
+		return
+	}
+	var req changePwdReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respond.Fail(c, apperr.BadRequest("VALIDATION_ERROR", "请输入当前密码与新密码"))
+		return
+	}
+	newToken, err := h.svc.ChangePassword(
+		c.Request.Context(), u.ID, req.OldPassword, req.NewPassword, c.ClientIP(), c.Request.UserAgent(),
+	)
+	if err != nil {
+		respond.Fail(c, err)
+		return
+	}
+	h.SetSessionCookie(c, newToken, int(h.svc.SessionCookieTTL().Seconds()))
+	respond.OK(c, gin.H{"message": "密码修改成功，其他设备已自动下线"})
 }
 
 type resetReq struct {
@@ -205,6 +288,8 @@ func (h *Handler) ResetPassword(c *gin.Context) {
 
 // Sessions GET /auth/sessions
 func (h *Handler) Sessions(c *gin.Context) {
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
+	c.Header("Pragma", "no-cache")
 	u := httpx.CurrentUser(c)
 	if u == nil {
 		respond.Fail(c, apperr.ErrUnauthenticated)

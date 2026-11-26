@@ -263,9 +263,12 @@ func (s *Service) ListMessages(ctx context.Context, userID, convID int64, limit,
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT m.id, m.sender_id, u.public_id::text, u.username, COALESCE(p.display_name, u.username),
-		       p.avatar_key, m.sender_id = $2, m.body_text, m.reply_to_id,
-		       COALESCE(r.body_text, ''), m.status, m.created_at,
-		       COALESCE((SELECT ma.storage_key FROM message_attachments ma WHERE ma.message_id = m.id LIMIT 1), '')
+		       p.avatar_key, m.sender_id = $2,
+		       CASE WHEN m.status = 'sent' THEN m.body_text ELSE '' END,
+		       m.reply_to_id,
+		       CASE WHEN r.status = 'sent' THEN COALESCE(r.body_text, '') ELSE '' END,
+		       m.status, m.created_at,
+		       CASE WHEN m.status = 'sent' THEN COALESCE((SELECT ma.storage_key FROM message_attachments ma WHERE ma.message_id = m.id LIMIT 1), '') ELSE '' END
 		FROM messages m
 		JOIN users u ON u.id = m.sender_id
 		JOIN user_profiles p ON p.user_id = u.id
@@ -298,6 +301,10 @@ func (s *Service) SendMessage(ctx context.Context, senderID int64, convID int64,
 	body = trimSpace(body)
 	if body == "" && imageKey == "" {
 		return nil, invalid("消息内容不能为空")
+	}
+	// 数据库约束要求 messages.body_text 非空：纯图片消息自动补占位文本
+	if body == "" && imageKey != "" {
+		body = "[图片]"
 	}
 	if len([]rune(body)) > 5000 {
 		return nil, invalid("消息最长 5000 字")
@@ -459,7 +466,7 @@ func (s *Service) UpdateSettings(ctx context.Context, userID, convID int64, mute
 	return err
 }
 
-// Recall 撤回自己的消息（5 分钟内）。
+// Recall 撤回自己的消息（5 分钟内；同步删除图片附件记录防止撤回后图片残留泄露）。
 func (s *Service) Recall(ctx context.Context, userID, messageID int64) error {
 	var senderID, convID int64
 	var status string
@@ -482,11 +489,21 @@ func (s *Service) Recall(ctx context.Context, userID, messageID int64) error {
 	if !CanRecall(createdAt, time.Now().UTC()) {
 		return apperr.Conflict("CONFLICT", "超过 5 分钟无法撤回")
 	}
-	_, err = s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return apperr.Internal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
 		UPDATE messages SET status = 'recalled', recalled_at = now_utc(),
 		  body_text = ''
-		WHERE id = $1`, messageID)
-	return err
+		WHERE id = $1`, messageID); err != nil {
+		return apperr.Internal(err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM message_attachments WHERE message_id = $1`, messageID); err != nil {
+		return apperr.Internal(err)
+	}
+	return tx.Commit(ctx)
 }
 
 // UnreadTotal 未读消息总数（免打扰会话不计入角标）。
@@ -562,23 +579,23 @@ type Handler struct{ svc *Service }
 // NewHandler 构造。
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 
-// Register 注册路由（write 组：限流 + 认证）。
+// Register 注册路由（禁言/封禁用户禁止新建会话或发送消息，并全量纳入 dmRl 限流）。
 func (h *Handler) Register(rg *gin.RouterGroup, dmRl gin.HandlerFunc) {
 	me := rg.Group("")
-	me.Use(httpx.RequireAuth(), httpx.RequireVerified())
+	me.Use(httpx.RequireAuth(), httpx.RequireVerified(), httpx.NoStore())
 	{
 		me.GET("/me/conversations", h.List)
 		me.GET("/me/conversations/unread-count", h.UnreadCount)
-		me.POST("/conversations", h.Open)
+		me.POST("/conversations", dmRl, httpx.RequireCanComment(), h.Open)
 		msgs := me.Group("/conversations/:id")
 		msgs.Use(dmRl)
 		{
 			msgs.GET("/messages", h.Messages)
-			msgs.POST("/messages", h.Send)
+			msgs.POST("/messages", httpx.RequireCanComment(), h.Send)
 			msgs.POST("/read", h.MarkRead)
 			msgs.PATCH("/settings", h.Settings)
 		}
-		me.DELETE("/messages/:id", h.Recall)
+		me.DELETE("/messages/:id", dmRl, h.Recall)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/yanji-community/backend/internal/modules/moderation"
 	"github.com/yanji-community/backend/internal/shared/apperr"
 	"github.com/yanji-community/backend/internal/shared/markdown"
 )
@@ -49,6 +50,7 @@ func NewRepo(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 type Service struct {
 	repo   *Repo
 	pool   *pgxpool.Pool
+	audit  *moderation.AuditLogger
 	logger *slog.Logger
 }
 
@@ -56,6 +58,9 @@ type Service struct {
 func New(pool *pgxpool.Pool, logger *slog.Logger) *Service {
 	return &Service{repo: NewRepo(pool), pool: pool, logger: logger}
 }
+
+// SetAudit 注入审计日志（管理端积分调整/勋章操作用）。
+func (s *Service) SetAudit(a *moderation.AuditLogger) { s.audit = a }
 
 // GrantTx 在业务事务内发放/扣减积分（幂等：idempotencyKey 冲突时整体跳过）。
 // 三步：1) 插入流水（幂等键冲突即跳过）→ 2) 账户余额原子增减（下限 0）→ 3) 回填流水余额快照。
@@ -96,18 +101,26 @@ func (s *Service) GrantTx(ctx context.Context, tx pgx.Tx, userID int64, sourceTy
 	return err
 }
 
-// Grant 非事务入口（生成服务端幂等键）。
-func (s *Service) Grant(ctx context.Context, userID int64, sourceType string, sourceID int64, amount int64, note string, operatorID int64) error {
+// GrantWithKey 非事务入口（使用调用方指定幂等键，并可选写入管理审计）。
+func (s *Service) GrantWithKey(ctx context.Context, userID int64, sourceType string, sourceID int64, idempotencyKey string, amount int64, note string, operatorID int64, auditDetail *moderation.Detail) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return apperr.Internal(err)
 	}
 	defer tx.Rollback(ctx)
-	key := "svc:" + sourceType + ":" + itoa(sourceID) + ":" + itoa(userID) + ":" + itoa(amount)
-	if err := s.GrantTx(ctx, tx, userID, sourceType, sourceID, key, amount, note, operatorID); err != nil {
+	if err := s.GrantTx(ctx, tx, userID, sourceType, sourceID, idempotencyKey, amount, note, operatorID); err != nil {
 		return apperr.Internal(err)
 	}
+	if auditDetail != nil && s.audit != nil {
+		s.audit.LogInTx(ctx, tx, *auditDetail)
+	}
 	return tx.Commit(ctx)
+}
+
+// Grant 非事务入口（生成服务端幂等键）。
+func (s *Service) Grant(ctx context.Context, userID int64, sourceType string, sourceID int64, amount int64, note string, operatorID int64) error {
+	key := "svc:" + sourceType + ":" + itoa(sourceID) + ":" + itoa(userID) + ":" + itoa(amount)
+	return s.GrantWithKey(ctx, userID, sourceType, sourceID, key, amount, note, operatorID, nil)
 }
 
 // Account 积分账户与等级。
@@ -364,10 +377,10 @@ func (s *Service) RewardFirstCommentLike(ctx context.Context, tx pgx.Tx, comment
 		"like_comment:"+itoa(commentID), PointsCommentLiked, "评论获得首个点赞", 0)
 }
 
-// RewardAnswerAccepted 最佳回答被采纳 → 回答者奖励（每条一次）。
-func (s *Service) RewardAnswerAccepted(ctx context.Context, tx pgx.Tx, commentID, authorID int64) error {
+// RewardAnswerAccepted 最佳回答被采纳 → 回答者奖励（每问答帖限领一次，防止反复切换最佳答案刷积分）。
+func (s *Service) RewardAnswerAccepted(ctx context.Context, tx pgx.Tx, postID, commentID, authorID int64) error {
 	return s.GrantTx(ctx, tx, authorID, SourceAnswerAccepted, commentID,
-		"accept:"+itoa(commentID), PointsAnswerAccepted, "回答被采纳为最佳答案", 0)
+		"accept_post:"+itoa(postID), PointsAnswerAccepted, "回答被采纳为最佳答案", 0)
 }
 
 // RewardPostPublished 帖子发布奖励（每帖一次，publish 场景调用）。

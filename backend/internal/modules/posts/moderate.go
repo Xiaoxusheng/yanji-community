@@ -23,6 +23,7 @@ func (s *Service) Moderate(ctx context.Context, actor *Viewer, actorID int64, re
 	statusChange := ""
 	reason := req.Reason
 	notify := true
+	var moveCountFrom, moveCountTo int64
 	switch req.Action {
 	case "approve":
 		if row.Status != StatusPendingReview {
@@ -79,6 +80,9 @@ func (s *Service) Moderate(ctx context.Context, actor *Viewer, actorID int64, re
 		fields["is_featured"] = false
 		notify = false
 	case "move_category":
+		if row.Status == StatusDeleted || row.Status == StatusDraft {
+			return apperr.Conflict("CONFLICT", "草稿或已删除帖子不可移动版块")
+		}
 		if req.CategorySlug == "" {
 			return apperr.BadRequest("VALIDATION_ERROR", "请指定目标版块")
 		}
@@ -91,15 +95,9 @@ func (s *Service) Moderate(ctx context.Context, actor *Viewer, actorID int64, re
 		}
 		if cat.ID != row.CategoryID {
 			fields["category_id"] = cat.ID
-			if row.Status == StatusPublished {
-				if _, err := s.deps.Pool.Exec(ctx,
-					`UPDATE categories SET post_count = GREATEST(0, post_count-1) WHERE id = $1`, row.CategoryID); err != nil {
-					return apperr.Internal(err)
-				}
-				if _, err := s.deps.Pool.Exec(ctx,
-					`UPDATE categories SET post_count = post_count + 1 WHERE id = $1`, cat.ID); err != nil {
-					return apperr.Internal(err)
-				}
+			if row.Status == StatusPublished || row.Status == StatusLocked {
+				moveCountFrom = row.CategoryID
+				moveCountTo = cat.ID
 			}
 		}
 		notify = false
@@ -113,19 +111,30 @@ func (s *Service) Moderate(ctx context.Context, actor *Viewer, actorID int64, re
 	}
 	defer tx.Rollback(ctx)
 
+	if moveCountFrom > 0 && moveCountTo > 0 {
+		if _, err := tx.Exec(ctx,
+			`UPDATE categories SET post_count = GREATEST(0, post_count - 1) WHERE id = $1`, moveCountFrom); err != nil {
+			return apperr.Internal(err)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE categories SET post_count = post_count + 1 WHERE id = $1`, moveCountTo); err != nil {
+			return apperr.Internal(err)
+		}
+	}
+
 	if statusChange != "" {
-		wasPublished := row.Status == StatusPublished
-		willPublish := statusChange == StatusPublished
+		wasVisible := row.Status == StatusPublished || row.Status == StatusLocked
+		willVisible := statusChange == StatusPublished || statusChange == StatusLocked
 		if err := s.repo.SetStatusTx(ctx, tx, row.ID, statusChange, reason); err != nil {
 			return apperr.Internal(err)
 		}
-		if wasPublished && !willPublish {
+		if wasVisible && !willVisible {
 			if _, err := tx.Exec(ctx,
 				`UPDATE categories SET post_count = GREATEST(0, post_count - 1) WHERE id = $1`, row.CategoryID); err != nil {
 				return apperr.Internal(err)
 			}
 		}
-		if !wasPublished && willPublish {
+		if !wasVisible && willVisible {
 			if _, err := tx.Exec(ctx,
 				`UPDATE categories SET post_count = post_count + 1 WHERE id = $1`, row.CategoryID); err != nil {
 				return apperr.Internal(err)
@@ -188,9 +197,9 @@ func (s *Service) FeatureItem(ctx context.Context, operatorID int64, publicID st
 	return err
 }
 
-// AdminList 后台列表。
-func (s *Service) AdminList(ctx context.Context, status, categorySlug, q string, limit, offset int) ([]PostItem, int64, error) {
-	rows, total, err := s.repo.AdminList(ctx, status, categorySlug, q, limit, offset)
+// AdminList 后台列表（allowedCategoryIDs 为 nil 表示全局管理员，否则仅查授权版块）。
+func (s *Service) AdminList(ctx context.Context, status, categorySlug, q string, allowedCategoryIDs []int64, limit, offset int) ([]PostItem, int64, error) {
+	rows, total, err := s.repo.AdminList(ctx, status, categorySlug, q, allowedCategoryIDs, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -243,7 +252,7 @@ func (s *Service) BatchModerate(ctx context.Context, actor *Viewer, actorID int6
 	for _, id := range in.IDs {
 		err := s.Moderate(ctx, actor, actorID, requestID, id, ModerateRequest{Action: in.Action, Reason: in.Reason})
 		if err != nil {
-			results = append(results, map[string]any{"id": id, "ok": false, "error": err.Error()})
+			results = append(results, map[string]any{"id": id, "ok": false, "error": apperr.From(err).Message})
 			continue
 		}
 		succeeded++

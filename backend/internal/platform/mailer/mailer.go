@@ -63,7 +63,7 @@ func (m *SMTPMailer) Send(_ context.Context, to, subject, body string) error {
 	}, "\r\n")
 
 	auth := smtp.PlainAuth("", m.username, m.password, m.host)
-	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: m.host})
+	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: m.host, MinVersion: tls.VersionTLS12})
 	if err != nil {
 		return fmt.Errorf("SMTP 连接失败: %w", err)
 	}

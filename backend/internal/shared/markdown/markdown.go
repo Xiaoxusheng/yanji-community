@@ -4,6 +4,7 @@ package markdown
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer/html"
 )
+
+var safeClassRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+(\s+[a-zA-Z0-9_-]+)*$`)
 
 var md = goldmark.New(
 	goldmark.WithExtensions(
@@ -31,11 +34,12 @@ var md = goldmark.New(
 
 var policy = func() *bluemonday.Policy {
 	p := bluemonday.UGCPolicy() // 已含链接/图片/标题/列表/表格等白名单
-	// 代码高亮常用结构
-	p.AllowAttrs("class").OnElements("code", "pre", "span")
+	// 代码高亮常用结构（限定安全 class 值字符集，防止属性注入）
+	p.AllowAttrs("class").Matching(safeClassRe).OnElements("code", "pre", "span")
 	p.AllowElements("figure", "figcaption")
-	// 强制所有链接 rel="nofollow noopener noreferrer" 并禁用 javascript: 协议
+	// 强制所有链接 rel="nofollow noreferrer" 并仅允许 http/https/mailto 协议
 	p.RequireNoFollowOnLinks(true)
+	p.RequireNoReferrerOnLinks(true)
 	p.AllowURLSchemes("http", "https", "mailto")
 	return p
 }()

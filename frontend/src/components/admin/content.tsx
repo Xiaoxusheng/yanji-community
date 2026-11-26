@@ -4,7 +4,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Table, Card, Button, Space, Tag, Modal, Form, Input, Select, message, Popconfirm, Switch,
+  Table, Card, Button, Space, Tag, Modal, Form, Input, InputNumber, Select, message, Popconfirm, Switch,
 } from "antd";
 import { api } from "@/lib/api";
 import type { Category, Tag as TagType } from "@/lib/types";
@@ -87,7 +87,7 @@ export function AdminCategoriesPage() {
         <Input placeholder="📁" maxLength={4} />
       </Form.Item>
       <Form.Item name="sort_order" label="排序（越小越前）" initialValue={0}>
-        <Input type="number" />
+        <InputNumber style={{ width: "100%" }} />
       </Form.Item>
       <Form.Item name="visibility" label="可见性" initialValue="public">
         <Select options={policyOptions.visibility} />

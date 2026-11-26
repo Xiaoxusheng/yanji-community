@@ -122,6 +122,19 @@ func (r *Repo) CreateSession(ctx context.Context, userID int64, deviceName, ua, 
 	return token, nil
 }
 
+// CreateSessionTx 在事务内创建新会话并返回原始 token。
+func (r *Repo) CreateSessionTx(ctx context.Context, tx pgx.Tx, userID int64, deviceName, ua, ip string, ttl time.Duration) (string, error) {
+	token := randomToken()
+	_, err := tx.Exec(ctx, `
+		INSERT INTO user_sessions (user_id, token_hash, device_name, user_agent, ip_address, expires_at)
+		VALUES ($1, $2, $3, $4, $5, now_utc() + ($6::text)::interval)`,
+		userID, TokenHash(token), deviceName, ua, ip, fmt.Sprintf("%d seconds", int(ttl.Seconds())))
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
 // RevokeSession 撤销会话（校验归属）。
 func (r *Repo) RevokeSession(ctx context.Context, userID, sessionID int64) error {
 	tag, err := r.pool.Exec(ctx,
@@ -141,6 +154,24 @@ func (r *Repo) RevokeAllSessions(ctx context.Context, userID int64) error {
 	_, err := r.pool.Exec(ctx,
 		`UPDATE user_sessions SET revoked_at = now_utc() WHERE user_id = $1 AND revoked_at IS NULL`, userID)
 	return err
+}
+
+// RevokeAllSessionsTx 在事务内撤销用户全部会话。
+func (r *Repo) RevokeAllSessionsTx(ctx context.Context, tx pgx.Tx, userID int64) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE user_sessions SET revoked_at = now_utc() WHERE user_id = $1 AND revoked_at IS NULL`, userID)
+	return err
+}
+
+// GetPasswordHash 读取当前有效用户的密码哈希（用于修改密码校验旧密码）。
+func (r *Repo) GetPasswordHash(ctx context.Context, userID int64) (string, error) {
+	var hash string
+	err := r.pool.QueryRow(ctx,
+		`SELECT password_hash FROM users WHERE id = $1 AND deleted_at IS NULL`, userID).Scan(&hash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", apperr.ErrUnauthenticated
+	}
+	return hash, err
 }
 
 // ValidateToken 校验会话 token，返回用户上下文。
@@ -174,26 +205,72 @@ func (r *Repo) ValidateToken(ctx context.Context, token string) (*SessionUser, e
 		UPDATE users SET last_active_at = now_utc()
 		WHERE id = $1 AND (last_active_at IS NULL OR last_active_at < now_utc() - interval '60 seconds')`, su.ID)
 
-	// 查询生效处罚
-	_ = r.pool.QueryRow(ctx, `
+	// 聚合全部仍在生效期内的处罚（忽略已过期但尚未被 worker 扫描的记录），避免多处罚覆盖绕过
+	srows, serr := r.pool.Query(ctx, `
 		SELECT sanction_type, ends_at FROM user_sanctions
-		WHERE user_id = $1 AND status = 'active'
-		ORDER BY created_at DESC LIMIT 1`, su.ID).
-		Scan(&su.SanctionType, &su.SanctionEnds)
+		WHERE user_id = $1 AND status = 'active' AND (ends_at IS NULL OR ends_at > now_utc())
+		ORDER BY created_at DESC`, su.ID)
+	if serr == nil {
+		defer srows.Close()
+		bestRank := 0
+		for srows.Next() {
+			var st string
+			var ends *time.Time
+			if srows.Scan(&st, &ends) == nil && st != "" {
+				su.ActiveSanctions = append(su.ActiveSanctions, st)
+				if rnk := sanctionSeverity(st); rnk > bestRank {
+					bestRank = rnk
+					su.SanctionType = st
+					su.SanctionEnds = ends
+				}
+			}
+		}
+	}
 	return &su, nil
+}
+
+// HasActiveBan 检查用户是否存在仍在生效期的封禁处罚（temp_ban / perma_ban）。
+func (r *Repo) HasActiveBan(ctx context.Context, userID int64) (bool, error) {
+	var exists bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM user_sanctions
+			WHERE user_id = $1 AND status = 'active'
+			  AND sanction_type IN ('temp_ban', 'perma_ban')
+			  AND (ends_at IS NULL OR ends_at > now_utc())
+		)`, userID).Scan(&exists)
+	return exists, err
+}
+
+func sanctionSeverity(st string) int {
+	switch st {
+	case "perma_ban":
+		return 5
+	case "temp_ban":
+		return 4
+	case "mute":
+		return 3
+	case "post_ban":
+		return 2
+	case "warn":
+		return 1
+	default:
+		return 0
+	}
 }
 
 // SessionUser 会话携带的用户上下文。
 type SessionUser struct {
-	ID            int64
-	PublicID      string
-	Username      string
-	Email         string
-	Status        string
-	EmailVerified bool
-	SessionID     int64
-	SanctionType  string
-	SanctionEnds  *time.Time
+	ID              int64
+	PublicID        string
+	Username        string
+	Email           string
+	Status          string
+	EmailVerified   bool
+	SessionID       int64
+	SanctionType    string
+	SanctionEnds    *time.Time
+	ActiveSanctions []string
 }
 
 // SessionRow 设备列表行。
@@ -233,20 +310,20 @@ func (r *Repo) ListSessions(ctx context.Context, userID, currentSessionID int64)
 	return out, rows.Err()
 }
 
-// CreateEmailToken 创建一次性邮箱验证令牌，返回原始 token。
-func (r *Repo) CreateEmailToken(ctx context.Context, userID int64, ttl time.Duration) (string, error) {
+// CreateEmailTokenTx 在事务内创建一次性邮箱验证令牌，返回原始 token。
+func (r *Repo) CreateEmailTokenTx(ctx context.Context, tx pgx.Tx, userID int64, ttl time.Duration) (string, error) {
 	token := randomToken()
-	_, err := r.pool.Exec(ctx, `
+	_, err := tx.Exec(ctx, `
 		INSERT INTO email_verification_tokens (user_id, token_hash, expires_at)
 		VALUES ($1, $2, now_utc() + ($3::text)::interval)`,
 		userID, TokenHash(token), fmt.Sprintf("%d seconds", int(ttl.Seconds())))
 	return token, err
 }
 
-// CreateResetToken 创建一次性密码重置令牌，返回原始 token。
-func (r *Repo) CreateResetToken(ctx context.Context, userID int64, ttl time.Duration) (string, error) {
+// CreateResetTokenTx 在事务内创建一次性密码重置令牌，返回原始 token。
+func (r *Repo) CreateResetTokenTx(ctx context.Context, tx pgx.Tx, userID int64, ttl time.Duration) (string, error) {
 	token := randomToken()
-	_, err := r.pool.Exec(ctx, `
+	_, err := tx.Exec(ctx, `
 		INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
 		VALUES ($1, $2, now_utc() + ($3::text)::interval)`,
 		userID, TokenHash(token), fmt.Sprintf("%d seconds", int(ttl.Seconds())))
@@ -349,6 +426,59 @@ func CheckPassword(hash, password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }
 
+var weakPasswords = map[string]bool{
+	"password": true, "12345678": true, "123456789": true, "1234567890": true,
+	"qwertyui": true, "qwerty123": true, "admin123": true, "admin1234": true,
+	"88888888": true, "00000000": true, "11111111": true, "abc12345": true,
+	"letmein1": true, "welcome1": true,
+}
+
+// ValidatePassword 校验密码长度与基础复杂度（至少包含大小写字母/数字/符号中的两类，拦截常见弱口令）。
+func ValidatePassword(password string) error {
+	if len(password) < 8 || len(password) > 72 {
+		return apperr.BadRequest("VALIDATION_ERROR", "密码长度需为 8-72 位")
+	}
+	if strings.TrimSpace(password) == "" {
+		return apperr.BadRequest("VALIDATION_ERROR", "密码不能全为空格")
+	}
+	if weakPasswords[strings.ToLower(password)] {
+		return apperr.BadRequest("VALIDATION_ERROR", "密码过于简单，请更换更高强度的组合")
+	}
+	var hasLower, hasUpper, hasDigit, hasSymbol bool
+	var firstRune rune
+	allSame := true
+	for i, r := range password {
+		if i == 0 {
+			firstRune = r
+		} else if r != firstRune {
+			allSame = false
+		}
+		switch {
+		case r >= 'a' && r <= 'z':
+			hasLower = true
+		case r >= 'A' && r <= 'Z':
+			hasUpper = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r != ' ' && r != '\t' && r != '\n' && r != '\r':
+			hasSymbol = true
+		}
+	}
+	if allSame {
+		return apperr.BadRequest("VALIDATION_ERROR", "密码不能为单一重复字符")
+	}
+	classes := 0
+	for _, ok := range []bool{hasLower, hasUpper, hasDigit, hasSymbol} {
+		if ok {
+			classes++
+		}
+	}
+	if classes < 2 {
+		return apperr.BadRequest("VALIDATION_ERROR", "密码需至少包含字母、数字或符号中的两种")
+	}
+	return nil
+}
+
 // ValidateRegister 校验注册参数。
 func ValidateRegister(username, email, password string) error {
 	if !usernameRe.MatchString(username) {
@@ -357,10 +487,7 @@ func ValidateRegister(username, email, password string) error {
 	if !emailRe.MatchString(email) || len(email) > 254 {
 		return apperr.BadRequest("VALIDATION_ERROR", "邮箱格式不正确")
 	}
-	if len(password) < 8 || len(password) > 72 {
-		return apperr.BadRequest("VALIDATION_ERROR", "密码长度需为 8-72 位")
-	}
-	return nil
+	return ValidatePassword(password)
 }
 
 // EmitVerificationEmail 写入验证邮件 Outbox 事件。

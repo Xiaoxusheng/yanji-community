@@ -6,19 +6,39 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/yanji-community/backend/internal/shared/apperr"
 )
+
+const (
+	loginLockWindow      = 15 * time.Minute
+	loginMaxFailPerPair  = 5
+	loginMaxFailPerAcc   = 12
+	loginLockMemCap      = 10000
+	loginFailLuaScript   = `local c = redis.call('INCR', KEYS[1]); if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end; return c`
+	dummyBcryptHashConst = "$2a$12$R9h/cIPz0gi.URNNX3kh2OPST9/PgBkqquzi.Ss7KIUgO2t0jWMUW"
+)
+
+type loginFailEntry struct {
+	count     int
+	expiresAt time.Time
+}
 
 // Service 认证业务逻辑。事务边界与状态机全部在此层控制。
 type Service struct {
 	pool   *pgxpool.Pool
 	repo   *Repo
 	logger *slog.Logger
+	rdb    *redis.Client
+
+	failMu  sync.Mutex
+	failMem map[string]loginFailEntry
 
 	sessionTTL time.Duration
 	publicURL  string
@@ -33,9 +53,16 @@ type pointsRegistrar interface {
 // SetPoints 注入积分服务（注册奖励）。
 func (s *Service) SetPoints(p pointsRegistrar) { s.points = p }
 
+// SetRedis 注入 Redis 客户端（用于登录防暴破计数，未设置时自动使用进程内存限流兜底）。
+func (s *Service) SetRedis(r *redis.Client) { s.rdb = r }
+
 // New 构造认证服务。
 func New(pool *pgxpool.Pool, logger *slog.Logger, sessionTTL time.Duration, publicURL string) *Service {
-	return &Service{pool: pool, repo: NewRepo(pool), logger: logger, sessionTTL: sessionTTL, publicURL: publicURL}
+	return &Service{
+		pool: pool, repo: NewRepo(pool), logger: logger,
+		failMem:    make(map[string]loginFailEntry),
+		sessionTTL: sessionTTL, publicURL: publicURL,
+	}
 }
 
 // Repo 暴露给路由层（校验会话）。
@@ -59,7 +86,9 @@ type RegisterRequest struct {
 
 // Register 公开注册：创建用户、写验证邮件事件。防枚举：冲突统一提示。
 func (s *Service) Register(ctx context.Context, req RegisterRequest) error {
-	if err := ValidateRegister(req.Username, req.Email, req.Password); err != nil {
+	username := strings.TrimSpace(req.Username)
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	if err := ValidateRegister(username, email, req.Password); err != nil {
 		return err
 	}
 	hash, err := HashPassword(req.Password)
@@ -72,11 +101,11 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) error {
 	}
 	defer tx.Rollback(ctx)
 
-	u, err := s.repo.CreateTx(ctx, tx, req.Username, req.Email, hash)
+	u, err := s.repo.CreateTx(ctx, tx, username, email, hash)
 	if err != nil {
 		return err
 	}
-	token, err := s.repo.CreateEmailToken(ctx, u.ID, EmailTokenTTL)
+	token, err := s.repo.CreateEmailTokenTx(ctx, tx, u.ID, EmailTokenTTL)
 	if err != nil {
 		return apperr.Internal(err)
 	}
@@ -105,25 +134,45 @@ type LoginRequest struct {
 	UA       string `json:"-"`
 }
 
-// Login 登录并返回会话 token（由 Handler 写入 Cookie）。
+// Login 登录并返回会话 token（含单账号防暴破锁定与等时密码校验，防止用户名枚举）。
 func (s *Service) Login(ctx context.Context, req LoginRequest) (string, error) {
-	if req.Account == "" || req.Password == "" {
+	account := strings.TrimSpace(req.Account)
+	if account == "" || req.Password == "" {
 		return "", apperr.BadRequest("VALIDATION_ERROR", "请输入账号与密码")
 	}
-	identity, err := s.repo.FindByIdentity(ctx, req.Account)
+	if err := s.checkLoginLockout(ctx, account, req.IP); err != nil {
+		return "", err
+	}
+	identity, err := s.repo.FindByIdentity(ctx, account)
 	if err != nil {
 		return "", apperr.Internal(err)
 	}
-	if identity == nil || !CheckPassword(identity.PasswordHash, req.Password) {
-		if identity != nil {
-			s.repo.LogLogin(ctx, identity.ID, false, req.IP, req.UA)
-		}
+	if identity == nil {
+		// 保持等时消耗，防止通过耗时差异枚举账号是否存在
+		_ = CheckPassword(dummyBcryptHashConst, req.Password)
+		s.recordLoginFailure(ctx, account, req.IP)
+		return "", apperr.BadRequest("INVALID_CREDENTIALS", "账号或密码不正确")
+	}
+	if err := s.checkLoginLockout(ctx, "uid:"+itoa64(identity.ID), req.IP); err != nil {
+		return "", err
+	}
+	if !CheckPassword(identity.PasswordHash, req.Password) {
+		s.repo.LogLogin(ctx, identity.ID, false, req.IP, req.UA)
+		s.recordLoginFailure(ctx, account, req.IP)
+		// 同步按用户 ID 计数，防止交替使用用户名与邮箱登录将尝试上限翻倍
+		s.recordLoginFailure(ctx, "uid:"+itoa64(identity.ID), req.IP)
 		return "", apperr.BadRequest("INVALID_CREDENTIALS", "账号或密码不正确")
 	}
 	if identity.Status == "banned" || identity.Status == "suspended" {
 		s.repo.LogLogin(ctx, identity.ID, false, req.IP, req.UA)
 		return "", apperr.ErrAccountSuspended
 	}
+	if banned, berr := s.repo.HasActiveBan(ctx, identity.ID); berr == nil && banned {
+		s.repo.LogLogin(ctx, identity.ID, false, req.IP, req.UA)
+		return "", apperr.ErrAccountSuspended
+	}
+	s.clearLoginFailure(ctx, account, req.IP)
+	s.clearLoginFailure(ctx, "uid:"+itoa64(identity.ID), req.IP)
 	token, err := s.repo.CreateSession(ctx, identity.ID, deviceFromUA(req.UA), req.UA, req.IP, s.sessionTTL)
 	if err != nil {
 		return "", apperr.Internal(err)
@@ -132,6 +181,86 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (string, error) {
 		`UPDATE users SET last_login_at = now_utc(), last_active_at = now_utc() WHERE id = $1`, identity.ID)
 	s.repo.LogLogin(ctx, identity.ID, true, req.IP, req.UA)
 	return token, nil
+}
+
+func loginPairKey(account, ip string) string {
+	return "login:fail:pair:" + TokenHash(strings.ToLower(strings.TrimSpace(account))+"|"+strings.TrimSpace(ip))
+}
+
+func loginAccKey(account string) string {
+	return "login:fail:acc:" + TokenHash(strings.ToLower(strings.TrimSpace(account)))
+}
+
+func (s *Service) checkLoginLockout(ctx context.Context, account, ip string) error {
+	pairKey := loginPairKey(account, ip)
+	accKey := loginAccKey(account)
+	if s.rdb != nil {
+		if n, err := s.rdb.Get(ctx, pairKey).Int(); err == nil && n >= loginMaxFailPerPair {
+			return apperr.TooMany("登录失败次数过多，请 15 分钟后再试")
+		}
+		if n, err := s.rdb.Get(ctx, accKey).Int(); err == nil && n >= loginMaxFailPerAcc {
+			return apperr.TooMany("该账号登录尝试过于频繁，请 15 分钟后再试")
+		}
+		return nil
+	}
+	now := time.Now().UTC()
+	s.failMu.Lock()
+	defer s.failMu.Unlock()
+	if ent, ok := s.failMem[pairKey]; ok && !now.After(ent.expiresAt) && ent.count >= loginMaxFailPerPair {
+		return apperr.TooMany("登录失败次数过多，请 15 分钟后再试")
+	}
+	if ent, ok := s.failMem[accKey]; ok && !now.After(ent.expiresAt) && ent.count >= loginMaxFailPerAcc {
+		return apperr.TooMany("该账号登录尝试过于频繁，请 15 分钟后再试")
+	}
+	return nil
+}
+
+func (s *Service) recordLoginFailure(ctx context.Context, account, ip string) {
+	pairKey := loginPairKey(account, ip)
+	accKey := loginAccKey(account)
+	if s.rdb != nil {
+		ttlSec := int(loginLockWindow.Seconds())
+		_, _ = s.rdb.Eval(ctx, loginFailLuaScript, []string{pairKey}, ttlSec).Result()
+		_, _ = s.rdb.Eval(ctx, loginFailLuaScript, []string{accKey}, ttlSec).Result()
+		return
+	}
+	now := time.Now().UTC()
+	s.failMu.Lock()
+	defer s.failMu.Unlock()
+	if len(s.failMem) >= loginLockMemCap {
+		for k, v := range s.failMem {
+			if now.After(v.expiresAt) {
+				delete(s.failMem, k)
+			}
+		}
+		for len(s.failMem) >= loginLockMemCap {
+			for k := range s.failMem {
+				delete(s.failMem, k)
+				break
+			}
+		}
+	}
+	for _, k := range []string{pairKey, accKey} {
+		ent := s.failMem[k]
+		if now.After(ent.expiresAt) {
+			ent = loginFailEntry{count: 0, expiresAt: now.Add(loginLockWindow)}
+		}
+		ent.count++
+		s.failMem[k] = ent
+	}
+}
+
+func (s *Service) clearLoginFailure(ctx context.Context, account, ip string) {
+	pairKey := loginPairKey(account, ip)
+	accKey := loginAccKey(account)
+	if s.rdb != nil {
+		_ = s.rdb.Del(ctx, pairKey, accKey).Err()
+		return
+	}
+	s.failMu.Lock()
+	delete(s.failMem, pairKey)
+	delete(s.failMem, accKey)
+	s.failMu.Unlock()
 }
 
 // Logout 撤销当前会话。
@@ -213,7 +342,7 @@ func (s *Service) sendVerificationFor(ctx context.Context, userID int64) error {
 		return apperr.Internal(err)
 	}
 	defer tx.Rollback(ctx)
-	token, err := s.repo.CreateEmailToken(ctx, userID, EmailTokenTTL)
+	token, err := s.repo.CreateEmailTokenTx(ctx, tx, userID, EmailTokenTTL)
 	if err != nil {
 		return apperr.Internal(err)
 	}
@@ -225,6 +354,7 @@ func (s *Service) sendVerificationFor(ctx context.Context, userID int64) error {
 
 // ForgotPassword 发起密码重置；无论邮箱是否存在都返回成功（防枚举）。
 func (s *Service) ForgotPassword(ctx context.Context, email string) error {
+	email = strings.ToLower(strings.TrimSpace(email))
 	userID, err := s.repo.FindEmailForReset(ctx, email)
 	if err != nil {
 		return apperr.Internal(err)
@@ -239,7 +369,7 @@ func (s *Service) ForgotPassword(ctx context.Context, email string) error {
 		return apperr.Internal(err)
 	}
 	defer tx.Rollback(ctx)
-	token, err := s.repo.CreateResetToken(ctx, userID, PasswordResetTTL)
+	token, err := s.repo.CreateResetTokenTx(ctx, tx, userID, PasswordResetTTL)
 	if err != nil {
 		return apperr.Internal(err)
 	}
@@ -251,8 +381,8 @@ func (s *Service) ForgotPassword(ctx context.Context, email string) error {
 
 // ResetPassword 重置密码并撤销全部会话。
 func (s *Service) ResetPassword(ctx context.Context, token, newPassword string) error {
-	if len(newPassword) < 8 || len(newPassword) > 72 {
-		return apperr.BadRequest("VALIDATION_ERROR", "密码长度需为 8-72 位")
+	if err := ValidatePassword(newPassword); err != nil {
+		return err
 	}
 	userID, err := s.repo.ConsumeResetToken(ctx, token)
 	if err != nil {
@@ -270,10 +400,60 @@ func (s *Service) ResetPassword(ctx context.Context, token, newPassword string) 
 	if err := s.repo.UpdatePasswordTx(ctx, tx, userID, hash); err != nil {
 		return apperr.Internal(err)
 	}
-	if err := s.repo.RevokeAllSessions(ctx, userID); err != nil {
+	if err := s.repo.RevokeAllSessionsTx(ctx, tx, userID); err != nil {
 		return apperr.Internal(err)
 	}
 	return tx.Commit(ctx)
+}
+
+// ChangePassword 已登录用户验证当前密码后修改密码，吊销全部旧会话并为当前设备轮换签发新会话。
+func (s *Service) ChangePassword(ctx context.Context, userID int64, oldPassword, newPassword, ip, ua string) (string, error) {
+	if oldPassword == "" || newPassword == "" {
+		return "", apperr.BadRequest("VALIDATION_ERROR", "请输入当前密码与新密码")
+	}
+	if oldPassword == newPassword {
+		return "", apperr.BadRequest("VALIDATION_ERROR", "新密码不能与当前密码相同")
+	}
+	if err := ValidatePassword(newPassword); err != nil {
+		return "", err
+	}
+	pwdLockAcc := "chpwd:" + itoa64(userID)
+	if err := s.checkLoginLockout(ctx, pwdLockAcc, ip); err != nil {
+		return "", apperr.TooMany("当前密码验证失败次数过多，请 15 分钟后再试")
+	}
+	hash, err := s.repo.GetPasswordHash(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if !CheckPassword(hash, oldPassword) {
+		s.recordLoginFailure(ctx, pwdLockAcc, ip)
+		return "", apperr.BadRequest("INVALID_CREDENTIALS", "当前密码不正确")
+	}
+	s.clearLoginFailure(ctx, pwdLockAcc, ip)
+	newHash, err := HashPassword(newPassword)
+	if err != nil {
+		return "", apperr.Internal(err)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", apperr.Internal(err)
+	}
+	defer tx.Rollback(ctx)
+	if err := s.repo.UpdatePasswordTx(ctx, tx, userID, newHash); err != nil {
+		return "", apperr.Internal(err)
+	}
+	if err := s.repo.RevokeAllSessionsTx(ctx, tx, userID); err != nil {
+		return "", apperr.Internal(err)
+	}
+	token, err := s.repo.CreateSessionTx(ctx, tx, userID, deviceFromUA(ua), ua, ip, s.sessionTTL)
+	if err != nil {
+		return "", apperr.Internal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", apperr.Internal(err)
+	}
+	s.logger.Info("password changed", "user_id", userID)
+	return token, nil
 }
 
 // VerificationLink 生成前端验证链接。

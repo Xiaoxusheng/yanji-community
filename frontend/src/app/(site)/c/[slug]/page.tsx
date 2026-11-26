@@ -1,18 +1,18 @@
 "use client";
 
-// 版块详情：简介、公告、置顶、帖子列表（最新/热门排序）、关注版块。
+// 版块详情：简介、排序切换、关注、版主列表与公告。
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { api, fmtCount } from "@/lib/api";
 import type { Category, PostItem, Announcement } from "@/lib/types";
 import type { PageData } from "@/lib/api";
 import { PostList } from "@/components/post/PostCard";
 import { PageHeader, ListSkeleton, ErrorState } from "@/components/ui/States";
 import { useMe } from "@/lib/auth";
 import { toast } from "@/lib/toast";
+import { IconCheck, IconFileText, IconPlus, IconShield } from "@/components/ui/Icons";
 
 export default function CategoryDetailPage() {
   const params = useParams<{ slug: string }>();
@@ -49,7 +49,7 @@ export default function CategoryDetailPage() {
     try {
       if (cat.data?.is_following) {
         await api.delete(`/categories/${slug}/follow`);
-        toast("success", "已取消关注");
+        toast("success", "已取消关注版块");
       } else {
         await api.post(`/categories/${slug}/follow`);
         toast("success", "已关注版块");
@@ -65,28 +65,47 @@ export default function CategoryDetailPage() {
   const c = cat.data.category;
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 300px", gap: 24, alignItems: "start" }}>
+    <div className="layout-main-rail">
       <div>
         <PageHeader
           title={c.name}
           subtitle={c.description}
+          action={
+            c.status === "archived" ? (
+              <span className="tag tag-warning">版块已归档</span>
+            ) : (
+              <Link href={`/compose?category=${c.slug}`} className="btn btn-primary btn-sm">
+                <IconPlus size={14} /> 发布到此版块
+              </Link>
+            )
+          }
         />
+
         <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center" }}>
-          <button className={`btn btn-sm ${sort === "latest" ? "btn-primary" : "btn-secondary"}`} onClick={() => { setSort("latest"); setPage(1); }}>
-            最新
-          </button>
-          <button className={`btn btn-sm ${sort === "hot" ? "btn-primary" : "btn-secondary"}`} onClick={() => { setSort("hot"); setPage(1); }}>
-            热门
-          </button>
-          <span style={{ marginLeft: "auto" }} />
-          {c.status === "archived" ? (
-            <span className="tag tag-warning">版块已归档，仅供浏览</span>
-          ) : (
-            <Link href={`/compose?category=${c.slug}`} className="btn btn-primary btn-sm">
-              发帖
-            </Link>
-          )}
+          <div className="seg-tabs">
+            <button
+              type="button"
+              className={`seg-tab ${sort === "latest" ? "is-active" : ""}`}
+              onClick={() => {
+                setSort("latest");
+                setPage(1);
+              }}
+            >
+              最新回复
+            </button>
+            <button
+              type="button"
+              className={`seg-tab ${sort === "hot" ? "is-active" : ""}`}
+              onClick={() => {
+                setSort("hot");
+                setPage(1);
+              }}
+            >
+              最热讨论
+            </button>
+          </div>
         </div>
+
         <PostList
           posts={posts.data?.items}
           loading={posts.isLoading}
@@ -98,33 +117,52 @@ export default function CategoryDetailPage() {
           onPageChange={setPage}
         />
       </div>
-      <aside style={{ display: "flex", flexDirection: "column", gap: 16, position: "sticky", top: 72 }}>
+
+      <aside className="sticky-rail">
         <section className="card" style={{ padding: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <h3 style={{ fontSize: 14, fontWeight: 700 }}>版块信息</h3>
-            <button className="btn btn-secondary btn-sm" onClick={toggleFollow}>
-              {cat.data?.is_following ? "已关注 ✓" : "关注"}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <h3 style={{ fontSize: 13.5, fontWeight: 650 }}>版块信息</h3>
+            <button
+              className={`btn btn-xs ${cat.data.is_following ? "btn-secondary" : "btn-primary"}`}
+              onClick={toggleFollow}
+            >
+              {cat.data.is_following ? (
+                <>
+                  <IconCheck size={12} /> 已关注
+                </>
+              ) : (
+                "+ 关注"
+              )}
             </button>
           </div>
-          <div style={{ fontSize: 13.5, color: "var(--text-2)", display: "flex", flexDirection: "column", gap: 6 }}>
-            <div>📝 帖子数：{c.post_count}</div>
-            <div>📋 发帖权限：{c.posting_policy === "all" ? "所有人" : c.posting_policy === "verified" ? "已验证用户" : "版块管理团队"}</div>
+          <div style={{ fontSize: 13, color: "var(--text-2)", display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <IconFileText size={14} style={{ color: "var(--text-3)" }} />
+              <span className="tabular-nums">累计帖子：{fmtCount(c.post_count)} 篇</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <IconShield size={14} style={{ color: "var(--text-3)" }} />
+              <span>发帖权限：{c.posting_policy === "all" ? "所有成员" : c.posting_policy === "verified" ? "已验证成员" : "仅限管理团队"}</span>
+            </div>
             {cat.data.moderators.length > 0 && (
-              <div>
-                👮 版主：{cat.data.moderators.map((m) => m.display_name).join("、")}
+              <div style={{ paddingTop: 8, borderTop: "1px solid var(--border)", fontSize: 12.5, color: "var(--text-3)" }}>
+                版主：{cat.data.moderators.map((m) => m.display_name).join("、")}
               </div>
             )}
           </div>
         </section>
+
         {(ann.data?.items.length ?? 0) > 0 && (
           <section className="card" style={{ padding: 16 }}>
-            <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>📢 公告</h3>
-            {ann.data!.items.slice(0, 3).map((a) => (
-              <div key={a.id} style={{ fontSize: 13.5, marginBottom: 8 }}>
-                <b>{a.title}</b>
-                <div style={{ color: "var(--text-3)", fontSize: 12.5 }}>{a.body}</div>
-              </div>
-            ))}
+            <h3 style={{ fontSize: 13.5, fontWeight: 650, marginBottom: 10 }}>全站公告</h3>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {ann.data!.items.slice(0, 3).map((a) => (
+                <div key={a.id} style={{ fontSize: 13 }}>
+                  <div style={{ fontWeight: 600 }}>{a.title}</div>
+                  {a.body && <div style={{ color: "var(--text-3)", fontSize: 12.5, marginTop: 2 }}>{a.body}</div>}
+                </div>
+              ))}
+            </div>
           </section>
         )}
       </aside>

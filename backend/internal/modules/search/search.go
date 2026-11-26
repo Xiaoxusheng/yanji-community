@@ -110,9 +110,15 @@ func (h *Handler) Search(c *gin.Context) {
 	}
 }
 
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// EscapeLike 转义 ILIKE 通配符，防止 % / _ 导致全表匹配放大。
+func EscapeLike(s string) string { return likeEscaper.Replace(s) }
+
 func (h *Handler) searchPosts(c *gin.Context, q string, pq pagination.Query, viewerID int64) {
+	likePat := "%" + EscapeLike(q) + "%"
 	sort := c.DefaultQuery("sort", "relevance")
-	order := `ts_rank(p.tsv, query) DESC`
+	order := `(ts_rank(p.tsv, websearch_to_tsquery('simple', $1)) + CASE WHEN p.title ILIKE $2 ESCAPE '\' THEN 0.5 ELSE 0 END) DESC, p.published_at DESC`
 	switch sort {
 	case "latest":
 		order = `p.published_at DESC`
@@ -121,12 +127,12 @@ func (h *Handler) searchPosts(c *gin.Context, q string, pq pagination.Query, vie
 		         / POWER(EXTRACT(EPOCH FROM (now_utc() - p.published_at))/3600.0 + 2, 1.2) DESC`
 	}
 	// 中文无分词：simple 配置下整句成单一词素，必须叠加 trigram ILIKE 兜底（title/body 索引见迁移 000010）
-	where := `p.status = 'published' AND p.deleted_at IS NULL
+	where := `p.status IN ('published', 'locked') AND p.deleted_at IS NULL
 	          AND c.status = 'active' AND c.visibility = 'public'
 	          AND (p.tsv @@ websearch_to_tsquery('simple', $1)
-	               OR p.title ILIKE '%' || $1 || '%'
-	               OR p.body_markdown ILIKE '%' || $1 || '%')`
-	args := []any{q}
+	               OR p.title ILIKE $2 ESCAPE '\'
+	               OR p.body_markdown ILIKE $2 ESCAPE '\')`
+	args := []any{q, likePat}
 	if cat := c.Query("category"); cat != "" {
 		args = append(args, cat)
 		where += ` AND c.slug = $` + strconv.Itoa(len(args))
@@ -165,8 +171,9 @@ func (h *Handler) searchPosts(c *gin.Context, q string, pq pagination.Query, vie
 		return
 	}
 	args = append(args, pq.PageSize, pq.Offset)
+	// 先使用哨兵词标记匹配关键词，读出后先转义全部 HTML 再还原 <mark>，彻底阻断搜索高亮存储型 XSS
 	headline := `ts_headline('simple', COALESCE(p.body_markdown, ''), websearch_to_tsquery('simple', $1),
-	              'StartSel=<mark>,StopSel=</mark>,MaxFragments=2,MaxWords=32,MinWords=16,FragmentDelimiter= … ')`
+	              'StartSel=[[YJ_MARK]],StopSel=[[/YJ_MARK]],MaxFragments=2,MaxWords=32,MinWords=16,FragmentDelimiter= … ')`
 	rows, err := h.svc.pool.Query(c.Request.Context(), `
 		SELECT p.public_id::text, p.title, `+headline+`,
 		       COALESCE(up.display_name, u.username), c.slug, c.name,
@@ -191,26 +198,45 @@ func (h *Handler) searchPosts(c *gin.Context, q string, pq pagination.Query, vie
 			respond.Fail(c, err)
 			return
 		}
+		it.Highlight = sanitizeHighlight(it.Highlight)
 		items = append(items, it)
 	}
 	respond.Page(c, items, pq.Page, pq.PageSize, total)
 }
 
+var htmlEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	`"`, "&quot;",
+	"'", "&#39;",
+)
+
+var markRestorer = strings.NewReplacer(
+	"[[YJ_MARK]]", "<mark>",
+	"[[/YJ_MARK]]", "</mark>",
+)
+
+func sanitizeHighlight(raw string) string {
+	return markRestorer.Replace(htmlEscaper.Replace(raw))
+}
+
 func (h *Handler) searchUsers(c *gin.Context, q string, pq pagination.Query) {
-	pattern := `%` + q + `%`
+	pattern := `%` + EscapeLike(q) + `%`
 	var total int64
 	if err := h.svc.pool.QueryRow(c.Request.Context(), `
 		SELECT COUNT(*) FROM users u JOIN user_profiles p ON p.user_id = u.id
 		WHERE u.deleted_at IS NULL AND u.status IN ('active','pending')
-		  AND (u.username ILIKE $1 OR p.display_name ILIKE $1)`, pattern).Scan(&total); err != nil {
+		  AND (u.username ILIKE $1 ESCAPE '\' OR p.display_name ILIKE $1 ESCAPE '\')`, pattern).Scan(&total); err != nil {
 		respond.Fail(c, err)
 		return
 	}
 	rows, err := h.svc.pool.Query(c.Request.Context(), `
-		SELECT u.public_id::text, u.username, COALESCE(p.display_name, u.username), p.avatar_key, p.bio
+		SELECT u.public_id::text, u.username, COALESCE(p.display_name, u.username), p.avatar_key,
+		       CASE WHEN p.profile_visibility = 'public' THEN p.bio ELSE '' END
 		FROM users u JOIN user_profiles p ON p.user_id = u.id
 		WHERE u.deleted_at IS NULL AND u.status IN ('active','pending')
-		  AND (u.username ILIKE $1 OR p.display_name ILIKE $1)
+		  AND (u.username ILIKE $1 ESCAPE '\' OR p.display_name ILIKE $1 ESCAPE '\')
 		ORDER BY u.username LIMIT $2 OFFSET $3`, pattern, pq.PageSize, pq.Offset)
 	if err != nil {
 		respond.Fail(c, err)
@@ -230,12 +256,13 @@ func (h *Handler) searchUsers(c *gin.Context, q string, pq pagination.Query) {
 }
 
 func (h *Handler) searchCategories(c *gin.Context, q string) {
+	pattern := `%` + EscapeLike(q) + `%`
 	rows, err := h.svc.pool.Query(c.Request.Context(), `
 		SELECT name, slug, description, post_count
 		FROM categories
 		WHERE deleted_at IS NULL AND status = 'active' AND visibility = 'public'
-		  AND (name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%')
-		ORDER BY post_count DESC LIMIT 20`, q)
+		  AND (name ILIKE $1 ESCAPE '\' OR description ILIKE $1 ESCAPE '\')
+		ORDER BY post_count DESC LIMIT 20`, pattern)
 	if err != nil {
 		respond.Fail(c, err)
 		return
@@ -254,10 +281,11 @@ func (h *Handler) searchCategories(c *gin.Context, q string) {
 }
 
 func (h *Handler) searchTags(c *gin.Context, q string) {
+	pattern := `%` + EscapeLike(q) + `%`
 	rows, err := h.svc.pool.Query(c.Request.Context(), `
 		SELECT name, slug, post_count FROM tags
-		WHERE status = 'active' AND (name ILIKE '%' || $1 || '%' OR slug ILIKE '%' || $1 || '%')
-		ORDER BY post_count DESC LIMIT 20`, q)
+		WHERE status = 'active' AND (name ILIKE $1 ESCAPE '\' OR slug ILIKE $1 ESCAPE '\')
+		ORDER BY post_count DESC LIMIT 20`, pattern)
 	if err != nil {
 		respond.Fail(c, err)
 		return

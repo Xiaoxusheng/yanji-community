@@ -1,14 +1,16 @@
 "use client";
 
-// 我的内容：全部状态帖子（含草稿/待审核/被隐藏）。
+// 我的内容：全部状态帖子管理。
 import Link from "next/link";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, type PageData } from "@/lib/api";
 import type { PostItem } from "@/lib/types";
 import { PostList } from "@/components/post/PostCard";
+import { PageHeader } from "@/components/ui/States";
 import { AuthShell } from "@/components/auth/forms";
 import { useMe } from "@/lib/auth";
+import { IconPlus } from "@/components/ui/Icons";
 
 const statusFilters = [
   { key: "", label: "全部" },
@@ -37,32 +39,40 @@ export default function MyPostsPage() {
   if (me && !me.authenticated) {
     return (
       <AuthShell title="请先登录">
-        <p style={{ marginBottom: 16 }}>登录后管理你的内容。</p>
+        <p style={{ marginBottom: 16, color: "var(--text-2)" }}>登录后查看和管理你发布的内容。</p>
         <Link href="/login" className="btn btn-primary">去登录</Link>
       </AuthShell>
     );
   }
 
   return (
-    <div style={{ maxWidth: 780, margin: "0 auto" }}>
-      <div style={{ display: "flex", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 6 }}>
-        <h1 style={{ fontSize: 20, fontWeight: 700 }}>我的内容</h1>
-        <span style={{ marginLeft: "auto" }} />
-        <Link href="/compose" className="btn btn-primary btn-sm">
-          写新帖
-        </Link>
+    <div style={{ maxWidth: 800, margin: "0 auto" }}>
+      <PageHeader
+        title="我的内容"
+        subtitle="草稿可在详情或编辑页继续完善与发布"
+        action={
+          <Link href="/compose" className="btn btn-primary btn-sm">
+            <IconPlus size={14} /> 发布新帖
+          </Link>
+        }
+      />
+      <div style={{ marginBottom: 14 }}>
+        <div className="seg-tabs" style={{ overflowX: "auto", maxWidth: "100%" }}>
+          {statusFilters.map((f) => (
+            <button
+              key={f.key}
+              className={`seg-tab ${status === f.key ? "is-active" : ""}`}
+              onClick={() => {
+                setStatus(f.key);
+                setPage(1);
+              }}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
       </div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
-        {statusFilters.map((f) => (
-          <button
-            key={f.key}
-            className={`btn btn-sm ${status === f.key ? "btn-primary" : "btn-secondary"}`}
-            onClick={() => { setStatus(f.key); setPage(1); }}
-          >
-            {f.label}
-          </button>
-        ))}
-      </div>
+
       <PostList
         posts={posts.data?.items}
         loading={posts.isLoading}
@@ -73,12 +83,9 @@ export default function MyPostsPage() {
         total={posts.data?.total ?? 0}
         onPageChange={setPage}
         showStatus
-        emptyTitle="这里还没有内容"
-        emptyDesc="写一篇帖子开始你的社区之旅"
+        emptyTitle="当前状态下还没有内容"
+        emptyDesc="写一篇帖子开启你的社区记录"
       />
-      <p style={{ fontSize: 12.5, color: "var(--text-3)", marginTop: 12 }}>
-        提示：草稿在编辑页继续完善；在帖子详情页可以编辑或删除自己的内容。
-      </p>
     </div>
   );
 }

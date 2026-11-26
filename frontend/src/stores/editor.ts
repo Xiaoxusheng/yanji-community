@@ -9,12 +9,13 @@ export interface DraftContent {
   body: string;
   tags: string[];
   category: string;
+  postType?: string;
   savedAt: number;
 }
 
 interface DraftState {
   drafts: Record<string, DraftContent>;
-  save: (key: string, d: { title: string; body: string; tags: string[]; category: string }) => void;
+  save: (key: string, d: { title: string; body: string; tags: string[]; category: string; postType?: string }) => void;
   clear: (key: string) => void;
 }
 

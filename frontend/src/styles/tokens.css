@@ -1,70 +1,170 @@
-/* Design Tokens —— 前台设计系统唯一来源（UI_SPEC） */
+/* Design Tokens —— 高阶现代编辑风社区设计系统（Atelier Slate & Indigo） */
 :root {
-  /* 中性色 */
-  --bg-page: #f7f8fa;
+  /* 画布与分层表面 */
+  --bg-page: #f5f6f9;
   --bg-card: #ffffff;
-  --bg-hover: #f0f2f5;
-  --bg-inset: #f4f5f7;
-  --border: #e5e7eb;
-  --border-strong: #d1d5db;
+  --bg-subtle: #fafbfc;
+  --bg-elevated: rgba(255, 255, 255, 0.8);
+  --bg-hover: #f1f3f7;
+  --bg-inset: #f2f4f8;
+  --border: rgba(15, 23, 42, 0.08);
+  --border-strong: rgba(15, 23, 42, 0.14);
+  --border-highlight: rgba(255, 255, 255, 0.85);
 
-  /* 文本 */
-  --text-1: #111827;
-  --text-2: #4b5563;
-  --text-3: #9ca3af;
+  /* 文本层级（确保 ≥4.5:1 对比度） */
+  --text-1: #0f172a;
+  --text-2: #475569;
+  --text-3: #64748b;
   --text-inverse: #ffffff;
 
-  /* 品牌与语义色 */
-  --brand: #4f46e5;
-  --brand-hover: #4338ca;
-  --brand-soft: #eef2ff;
-  --success: #16a34a;
-  --success-soft: #ecfdf5;
-  --warning: #d97706;
-  --warning-soft: #fffbeb;
-  --danger: #dc2626;
-  --danger-soft: #fef2f2;
-  --info: #2563eb;
-  --info-soft: #eff6ff;
+  /* 按钮主色（克制曜石黑）与品牌点缀色（靛蓝） */
+  --ink-btn: #111827;
+  --ink-btn-hover: #1f2937;
+  --ink-btn-text: #ffffff;
 
-  /* 圆角 / 阴影 / 间距 */
-  --radius-sm: 6px;
-  --radius: 10px;
-  --radius-lg: 14px;
-  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05);
-  --shadow-pop: 0 8px 24px rgba(16, 24, 40, 0.12);
+  --brand: #3b5bdb;
+  --brand-hover: #2f4ac4;
+  --brand-soft: rgba(59, 91, 219, 0.09);
+  --brand-ring: rgba(59, 91, 219, 0.22);
+  --brand-gradient: linear-gradient(135deg, #3b5bdb 0%, #6366f1 100%);
+  --ambient-glow: radial-gradient(ellipse 80% 420px at 50% -140px, rgba(99, 102, 241, 0.09), transparent 70%);
+
+  --success: #15803d;
+  --success-soft: rgba(21, 128, 61, 0.09);
+  --warning: #b45309;
+  --warning-soft: rgba(217, 119, 6, 0.11);
+  --danger: #dc2626;
+  --danger-soft: rgba(220, 38, 38, 0.09);
+  --info: #2563eb;
+  --info-soft: rgba(37, 99, 235, 0.09);
+
+  /* 圆角 / 多层柔和阴影 / 间距 */
+  --radius-xs: 6px;
+  --radius-sm: 9px;
+  --radius: 14px;
+  --radius-lg: 18px;
+  --shadow-card:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 1px 3px rgba(15, 23, 42, 0.02);
+  --shadow-hover:
+    0 10px 26px -10px rgba(15, 23, 42, 0.11),
+    0 2px 6px -1px rgba(15, 23, 42, 0.05);
+  --shadow-pop:
+    0 20px 44px -12px rgba(15, 23, 42, 0.18),
+    0 4px 12px -2px rgba(15, 23, 42, 0.06);
+  --shadow-btn:
+    0 1px 2px rgba(15, 23, 42, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
 
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
   --space-6: 24px;
-  --content-max: 1120px;
-  --reading-max: 720px;
+  --content-max: 1160px;
+  --reading-max: 740px;
 }
 
-/* 暗色模式：跟随系统偏好，token 全量映射 */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg-page: #0f1117;
-    --bg-card: #171a23;
-    --bg-hover: #1f2430;
-    --bg-inset: #1c202b;
-    --border: #2a2f3d;
-    --border-strong: #3a4152;
-    --text-1: #e5e7eb;
-    --text-2: #9ca3af;
-    --text-3: #6b7280;
+  :root:not([data-theme="light"]) {
+    --bg-page: #090b10;
+    --bg-card: #11141c;
+    --bg-subtle: #141822;
+    --bg-elevated: rgba(17, 20, 28, 0.78);
+    --bg-hover: #1a1f2c;
+    --bg-inset: #161a24;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.15);
+    --border-highlight: rgba(255, 255, 255, 0.06);
+
+    --text-1: #f1f5f9;
+    --text-2: #a5b1c4;
+    --text-3: #7c879b;
+    --text-inverse: #090b10;
+
+    --ink-btn: #f8fafc;
+    --ink-btn-hover: #e2e8f0;
+    --ink-btn-text: #0f172a;
+
     --brand: #818cf8;
     --brand-hover: #a5b4fc;
-    --brand-soft: #232743;
-    --success-soft: #10251a;
-    --warning-soft: #2a2213;
-    --danger-soft: #2c1517;
-    --info-soft: #14203a;
-    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.55);
+    --brand-soft: rgba(129, 140, 248, 0.14);
+    --brand-ring: rgba(129, 140, 248, 0.28);
+    --brand-gradient: linear-gradient(135deg, #6366f1 0%, #818cf8 100%);
+    --ambient-glow: radial-gradient(ellipse 80% 420px at 50% -140px, rgba(99, 102, 241, 0.14), transparent 72%);
+
+    --success: #4ade80;
+    --success-soft: rgba(74, 222, 128, 0.12);
+    --warning: #fbbf24;
+    --warning-soft: rgba(251, 191, 36, 0.13);
+    --danger: #f87171;
+    --danger-soft: rgba(248, 113, 113, 0.13);
+    --info: #60a5fa;
+    --info-soft: rgba(96, 165, 250, 0.13);
+
+    --shadow-card:
+      0 1px 2px rgba(0, 0, 0, 0.45),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    --shadow-hover:
+      0 14px 32px -10px rgba(0, 0, 0, 0.65),
+      inset 0 1px 0 rgba(255, 255, 255, 0.07);
+    --shadow-pop:
+      0 24px 56px -12px rgba(0, 0, 0, 0.78),
+      inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    --shadow-btn:
+      0 1px 2px rgba(0, 0, 0, 0.35),
+      inset 0 1px 0 rgba(255, 255, 255, 0.22);
   }
+}
+
+html[data-theme="dark"] {
+  --bg-page: #090b10;
+  --bg-card: #11141c;
+  --bg-subtle: #141822;
+  --bg-elevated: rgba(17, 20, 28, 0.78);
+  --bg-hover: #1a1f2c;
+  --bg-inset: #161a24;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --border-highlight: rgba(255, 255, 255, 0.06);
+
+  --text-1: #f1f5f9;
+  --text-2: #a5b1c4;
+  --text-3: #7c879b;
+  --text-inverse: #090b10;
+
+  --ink-btn: #f8fafc;
+  --ink-btn-hover: #e2e8f0;
+  --ink-btn-text: #0f172a;
+
+  --brand: #818cf8;
+  --brand-hover: #a5b4fc;
+  --brand-soft: rgba(129, 140, 248, 0.14);
+  --brand-ring: rgba(129, 140, 248, 0.28);
+  --brand-gradient: linear-gradient(135deg, #6366f1 0%, #818cf8 100%);
+  --ambient-glow: radial-gradient(ellipse 80% 420px at 50% -140px, rgba(99, 102, 241, 0.14), transparent 72%);
+
+  --success: #4ade80;
+  --success-soft: rgba(74, 222, 128, 0.12);
+  --warning: #fbbf24;
+  --warning-soft: rgba(251, 191, 36, 0.13);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.13);
+  --info: #60a5fa;
+  --info-soft: rgba(96, 165, 250, 0.13);
+
+  --shadow-card:
+    0 1px 2px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --shadow-hover:
+    0 14px 32px -10px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  --shadow-pop:
+    0 24px 56px -12px rgba(0, 0, 0, 0.78),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --shadow-btn:
+    0 1px 2px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
 }
 
 @media (prefers-reduced-motion: reduce) {

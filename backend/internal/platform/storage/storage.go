@@ -61,8 +61,11 @@ func ValidateImage(fh *multipart.FileHeader, maxBytes int64) (string, error) {
 	}
 	defer f.Close()
 	head := make([]byte, 12)
-	n, err := f.Read(head)
-	if err != nil && err.Error() != "EOF" && n == 0 {
+	n, err := io.ReadFull(f, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("读取上传文件失败: %w", err)
+	}
+	if n == 0 {
 		return "", fmt.Errorf("%w: 文件为空", ErrInvalidUpload)
 	}
 	if !matchMagic(head[:n], ext) {
@@ -76,7 +79,10 @@ func matchMagic(b []byte, ext string) bool {
 	case ".jpg", ".jpeg":
 		return len(b) >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF
 	case ".png":
-		return len(b) >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G'
+		// 完整 8 字节 PNG 文件头签名
+		return len(b) >= 8 &&
+			b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G' &&
+			b[4] == 0x0D && b[5] == 0x0A && b[6] == 0x1A && b[7] == 0x0A
 	case ".gif":
 		return len(b) >= 6 && (string(b[:6]) == "GIF87a" || string(b[:6]) == "GIF89a")
 	case ".webp":

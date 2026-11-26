@@ -13,7 +13,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/yanji-community/backend/internal/modules/moderation"
 	"github.com/yanji-community/backend/internal/shared/apperr"
+	httpx "github.com/yanji-community/backend/internal/shared/httpx"
 	"github.com/yanji-community/backend/internal/shared/pagination"
 	"github.com/yanji-community/backend/internal/shared/respond"
 )
@@ -97,7 +99,8 @@ func (r *Repo) ListPublic(ctx context.Context, pq pagination.Query) ([]Tag, int6
 		return nil, 0, err
 	}
 	defer rows.Close()
-	return scanTags(rows)
+	list, err := scanTags(rows)
+	return list, total, err
 }
 
 // GetBySlug 详情。
@@ -123,8 +126,7 @@ func (r *Repo) TagsForPost(ctx context.Context, postID int64) ([]Tag, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	list, _, err := scanTags(rows)
-	return list, err
+	return scanTags(rows)
 }
 
 // TagsForPosts 批量取帖子标签（避免 N+1）。
@@ -152,16 +154,16 @@ func (r *Repo) TagsForPosts(ctx context.Context, postIDs []int64) (map[int64][]T
 	return out, rows.Err()
 }
 
-func scanTags(rows pgx.Rows) ([]Tag, int64, error) {
+func scanTags(rows pgx.Rows) ([]Tag, error) {
 	var out []Tag
 	for rows.Next() {
 		var t Tag
 		if err := rows.Scan(&t.ID, &t.Name, &t.Slug, &t.Description, &t.Status, &t.PostCount, &t.CreatedAt); err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		out = append(out, t)
 	}
-	return out, 0, rows.Err()
+	return out, rows.Err()
 }
 
 // ---- 管理与创建 ----
@@ -222,7 +224,7 @@ func (r *Repo) ListAll(ctx context.Context, pq pagination.Query) ([]Tag, int64, 
 		return nil, 0, err
 	}
 	defer rows.Close()
-	list, _, err := scanTags(rows)
+	list, err := scanTags(rows)
 	return list, total, err
 }
 
@@ -231,8 +233,12 @@ func (r *Repo) ListAll(ctx context.Context, pq pagination.Query) ([]Tag, int64, 
 // Service 标签业务。
 type Service struct {
 	repo   *Repo
+	audit  *moderation.AuditLogger
 	logger *slog.Logger
 }
+
+// SetAudit 注入审计日志（标签增删改写入 operation_logs）。
+func (s *Service) SetAudit(a *moderation.AuditLogger) { s.audit = a }
 
 // ResolveIDs 暴露给帖子模块。
 func (s *Service) ResolveIDs(ctx context.Context, slugs []string) ([]int64, error) {
@@ -345,6 +351,7 @@ func (h *Handler) AdminList(c *gin.Context) {
 
 // Create POST /admin/tags
 func (h *Handler) Create(c *gin.Context) {
+	u := httpx.CurrentUser(c)
 	var req struct {
 		Name        string `json:"name"`
 		Slug        string `json:"slug"`
@@ -359,11 +366,18 @@ func (h *Handler) Create(c *gin.Context) {
 		respond.Fail(c, err)
 		return
 	}
+	if h.svc.audit != nil && u != nil {
+		h.svc.audit.Log(c.Request.Context(), moderation.Detail{
+			Action: "tag.create", TargetType: "tag", TargetID: id,
+			ActorID: u.ID, RequestID: c.GetString("request_id"), IP: c.ClientIP(), Note: req.Slug,
+		})
+	}
 	respond.Created(c, gin.H{"id": id})
 }
 
 // Update PATCH /admin/tags/:id
 func (h *Handler) Update(c *gin.Context) {
+	u := httpx.CurrentUser(c)
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {
 		respond.Fail(c, errInvalidID)
@@ -390,11 +404,18 @@ func (h *Handler) Update(c *gin.Context) {
 		respond.Fail(c, err)
 		return
 	}
+	if h.svc.audit != nil && u != nil {
+		h.svc.audit.Log(c.Request.Context(), moderation.Detail{
+			Action: "tag.update", TargetType: "tag", TargetID: id,
+			ActorID: u.ID, RequestID: c.GetString("request_id"), IP: c.ClientIP(),
+		})
+	}
 	respond.OK(c, gin.H{"message": "标签已更新"})
 }
 
 // Delete DELETE /admin/tags/:id
 func (h *Handler) Delete(c *gin.Context) {
+	u := httpx.CurrentUser(c)
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {
 		respond.Fail(c, errInvalidID)
@@ -403,6 +424,12 @@ func (h *Handler) Delete(c *gin.Context) {
 	if err := h.svc.repo.Delete(c.Request.Context(), id); err != nil {
 		respond.Fail(c, err)
 		return
+	}
+	if h.svc.audit != nil && u != nil {
+		h.svc.audit.Log(c.Request.Context(), moderation.Detail{
+			Action: "tag.delete", TargetType: "tag", TargetID: id,
+			ActorID: u.ID, RequestID: c.GetString("request_id"), IP: c.ClientIP(),
+		})
 	}
 	respond.OK(c, gin.H{"message": "标签已删除"})
 }

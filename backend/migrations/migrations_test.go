@@ -110,6 +110,9 @@ func TestRequiredTablesExist(t *testing.T) {
 		"user_blocks", "notifications", "reports", "moderation_actions", "user_sanctions",
 		"sensitive_words", "announcements", "featured_items", "operation_logs",
 		"login_logs", "system_configs", "outbox_events",
+		"point_accounts", "point_transactions", "sign_ins", "levels", "badges", "user_badges",
+		"polls", "poll_options", "poll_votes", "activities", "activity_participants", "appeals",
+		"conversations", "conversation_members", "messages", "message_attachments",
 	}
 	for _, tbl := range required {
 		if !strings.Contains(all.String(), "CREATE TABLE "+tbl) &&

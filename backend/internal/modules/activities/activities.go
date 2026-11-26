@@ -90,11 +90,12 @@ func (r *Repo) List(ctx context.Context, limit, offset int) ([]Activity, int64, 
 	return out, total, rows.Err()
 }
 
-// Get 详情。
+// Get 公开详情（仅限已发布活动，防止按自增 ID 遍历草稿活动）。
 func (r *Repo) Get(ctx context.Context, id int64) (*Activity, error) {
 	a, err := scanAct(r.pool.QueryRow(ctx, `
 		SELECT `+actCols+`
-		FROM activities a JOIN users u ON u.id = a.created_by WHERE a.id = $1`, id))
+		FROM activities a JOIN users u ON u.id = a.created_by
+		WHERE a.id = $1 AND a.status = 'published'`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperr.NotFound("活动不存在")
 	}
@@ -217,11 +218,9 @@ func (s *Service) Join(ctx context.Context, userID int64, activityID int64) (boo
 	if err != nil || !joined {
 		return false, err
 	}
-	var creator, title string
-	_ = tx.QueryRow(ctx, `SELECT created_by, title FROM activities WHERE id = $1`, activityID).Scan(&creator, &title)
 	var creatorID int64
-	_, _ = strconv.ParseInt(creator, 10, 64)
-	_ = tx.QueryRow(ctx, `SELECT id FROM users WHERE username = $1`, creator).Scan(&creatorID)
+	var title string
+	_ = tx.QueryRow(ctx, `SELECT created_by, title FROM activities WHERE id = $1`, activityID).Scan(&creatorID, &title)
 	_ = notifications.EmitTx(ctx, tx, notifications.Payload{
 		RecipientID: creatorID, ActorID: userID, Type: notifications.TypeSystem,
 		ResourceType: "post", ResourceID: activityID,
@@ -242,10 +241,14 @@ type Handler struct{ svc *Service }
 // NewHandler 构造。
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 
-// RegisterPublic 公开路由。
+// RegisterPublic 公开读路由。
 func (h *Handler) RegisterPublic(rg *gin.RouterGroup) {
 	rg.GET("/activities", h.List)
 	rg.GET("/activities/:id", h.Get)
+}
+
+// RegisterAuth 登录/验证用户路由。
+func (h *Handler) RegisterAuth(rg *gin.RouterGroup) {
 	join := rg.Group("")
 	join.Use(httpx.RequireAuth(), httpx.RequireVerified())
 	join.POST("/activities/:id/join", h.Join)
@@ -258,6 +261,7 @@ func (h *Handler) RegisterAdmin(rg *gin.RouterGroup) {
 	rg.POST("/activities", h.Create)
 	rg.PATCH("/activities/:id", h.Update)
 	rg.DELETE("/activities/:id", h.Delete)
+	rg.GET("/activities/:id/participants", h.Participants)
 	rg.POST("/activities/:id/attend", h.MarkAttend)
 }
 
@@ -530,7 +534,7 @@ func (h *Handler) Participants(c *gin.Context) {
 		return
 	}
 	rows, err := h.svc.pool.Query(c.Request.Context(), `
-		SELECT ap.user_id, COALESCE(p.display_name, u.username), ap.status, ap.signed_at
+		SELECT ap.user_id, u.username, COALESCE(p.display_name, u.username), ap.status, ap.signed_at
 		FROM activity_participants ap
 		JOIN users u ON u.id = ap.user_id
 		JOIN user_profiles p ON p.user_id = u.id
@@ -542,6 +546,7 @@ func (h *Handler) Participants(c *gin.Context) {
 	defer rows.Close()
 	type part struct {
 		UserID   int64     `json:"user_id"`
+		Username string    `json:"username"`
 		Name     string    `json:"name"`
 		Status   string    `json:"status"`
 		SignedAt time.Time `json:"signed_at"`
@@ -549,7 +554,7 @@ func (h *Handler) Participants(c *gin.Context) {
 	items := []part{}
 	for rows.Next() {
 		var p part
-		if err := rows.Scan(&p.UserID, &p.Name, &p.Status, &p.SignedAt); err != nil {
+		if err := rows.Scan(&p.UserID, &p.Username, &p.Name, &p.Status, &p.SignedAt); err != nil {
 			respond.Fail(c, apperr.Internal(err))
 			return
 		}

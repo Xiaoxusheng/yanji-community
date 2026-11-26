@@ -156,14 +156,14 @@ function CommentItemView({
 
   const deleted = comment.status === "deleted";
   const hidden = comment.status === "hidden";
+  const unavailable = deleted || hidden;
   const canAccept =
     post.post_type === "question" &&
     post.status === "published" &&
     post.is_author &&
     !isMine &&
     comment.depth === 0 &&
-    !deleted &&
-    !hidden;
+    !unavailable;
 
   const isRoot = comment.depth === 0;
 
@@ -172,30 +172,32 @@ function CommentItemView({
       className={isRoot ? "card" : undefined}
       style={{
         display: "flex",
-        gap: 10,
-        padding: isRoot ? 16 : "10px 0 4px 14px",
+        gap: 11,
+        padding: isRoot ? "16px 18px" : "10px 0 4px 14px",
         marginLeft: comment.depth > 0 ? 18 : 0,
         borderLeft: comment.is_accepted_answer
           ? "3px solid var(--success)"
           : comment.depth > 0
             ? "2px solid var(--border)"
             : undefined,
-        background: comment.is_accepted_answer ? "var(--success-soft)" : undefined,
+        background: comment.is_accepted_answer
+          ? "linear-gradient(90deg, var(--success-soft) 0%, var(--bg-card) 42%)"
+          : undefined,
       }}
     >
       <Avatar
         name={comment.author.display_name}
         avatarKey={comment.author.avatar_key}
-        size={isRoot ? 32 : 26}
+        size={isRoot ? 34 : 26}
         link={`/u/${comment.author.username}`}
       />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, color: "var(--text-3)", flexWrap: "wrap" }}>
-          <Link href={`/u/${comment.author.username}`} style={{ fontWeight: 600, color: "var(--text-1)" }}>
+          <Link href={`/u/${comment.author.username}`} style={{ fontWeight: 620, color: "var(--text-1)" }}>
             {comment.author.display_name}
           </Link>
           {comment.author.username === post.author.username && (
-            <span className="tag tag-outline" style={{ fontSize: 11, padding: "1px 6px" }}>作者</span>
+            <span className="tag tag-brand" style={{ fontSize: 10.5, padding: "0 7px", lineHeight: "17px" }}>作者</span>
           )}
           {comment.is_accepted_answer && (
             <span className="tag tag-success">
@@ -208,23 +210,23 @@ function CommentItemView({
           {deleted && <span className="tag">已删除</span>}
         </div>
 
-        {comment.quote_id && (
+        {comment.quote_id && comment.quote_body && (
           <div
             style={{
-              borderLeft: "2px solid var(--border-strong)",
-              padding: "5px 10px",
+              borderLeft: "2px solid var(--brand)",
+              padding: "6px 11px",
               margin: "8px 0 4px",
               fontSize: 12.5,
               color: "var(--text-2)",
               background: "var(--bg-inset)",
-              borderRadius: "0 6px 6px 0",
+              borderRadius: "0 8px 8px 0",
             }}
           >
-            回复 <span style={{ fontWeight: 600 }}>{comment.quote_author}</span>：{comment.quote_body}
+            回复 <span style={{ fontWeight: 620, color: "var(--text-1)" }}>{comment.quote_author}</span>：{comment.quote_body}
           </div>
         )}
 
-        {!deleted && (
+        {!unavailable && (
           <div
             className="prose-community"
             style={{ fontSize: 14.5, marginTop: 6 }}
@@ -237,7 +239,16 @@ function CommentItemView({
             dangerouslySetInnerHTML={{ __html: comment.body_rendered }}
           />
         )}
-        {deleted && <div style={{ color: "var(--text-3)", fontSize: 13.5, padding: "6px 0" }}>该评论已被删除</div>}
+        {deleted && (
+          <div style={{ color: "var(--text-3)", fontSize: 13.5, fontStyle: "italic", padding: "8px 0" }}>
+            该评论已被删除
+          </div>
+        )}
+        {hidden && (
+          <div style={{ color: "var(--text-3)", fontSize: 13.5, fontStyle: "italic", padding: "8px 0" }}>
+            该评论因不符合社区规范已被隐藏
+          </div>
+        )}
 
         {editing ? (
           <div style={{ marginTop: 10 }}>
@@ -252,7 +263,7 @@ function CommentItemView({
             </div>
           </div>
         ) : (
-          !deleted && (
+          !unavailable && (
             <div style={{ display: "flex", gap: 4, marginTop: 6, fontSize: 12.5, color: "var(--text-3)", flexWrap: "wrap", alignItems: "center" }}>
               <button
                 className="btn btn-text btn-xs tabular-nums"

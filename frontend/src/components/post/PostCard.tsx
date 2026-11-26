@@ -1,7 +1,8 @@
 "use client";
 
-// 帖子卡片与列表（精致编辑感排版、微层次悬浮与数值对齐）。
+// 帖子卡片与列表（Framer Motion 克制渐进动效、语义类型色标、置顶质感与数值对齐）。
 import Link from "next/link";
+import { motion } from "framer-motion";
 import { timeAgo, fmtCount } from "@/lib/api";
 import type { PostItem } from "@/lib/types";
 import { Avatar } from "@/components/ui/Avatar";
@@ -30,7 +31,7 @@ const statusTags: Record<string, { text: string; cls: string }> = {
 export function PostTypeBadge({ type }: { type: string }) {
   if (type === "article") {
     return (
-      <span className="tag tag-outline">
+      <span className="tag tag-brand">
         <IconFileText size={11} /> 长文章
       </span>
     );
@@ -44,7 +45,7 @@ export function PostTypeBadge({ type }: { type: string }) {
   }
   if (type === "poll") {
     return (
-      <span className="tag tag-outline">
+      <span className="tag tag-warning">
         <IconBarChart size={11} /> 投票
       </span>
     );
@@ -52,10 +53,15 @@ export function PostTypeBadge({ type }: { type: string }) {
   return null;
 }
 
-export function PostCard({ post, showStatus }: { post: PostItem; showStatus?: boolean }) {
+export function PostCard({ post, showStatus, index = 0 }: { post: PostItem; showStatus?: boolean; index?: number }) {
   const st = showStatus ? statusTags[post.status] : undefined;
+  const delay = Math.min(index, 7) * 0.03;
+
   return (
-    <article
+    <motion.article
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.24, delay, ease: [0.22, 1, 0.36, 1] }}
       className={`card card-interactive ${post.is_pinned ? "post-card-pinned" : ""}`}
       style={{
         padding: "18px 20px",
@@ -70,7 +76,7 @@ export function PostCard({ post, showStatus }: { post: PostItem; showStatus?: bo
         <Link href={`/u/${post.author.username}`} style={{ fontWeight: 600, color: "var(--text-2)" }}>
           {post.author.display_name}
         </Link>
-        <span style={{ opacity: 0.55 }}>·</span>
+        <span style={{ opacity: 0.45 }}>·</span>
         <span className="tabular-nums">{timeAgo(post.published_at || post.created_at)}</span>
 
         <div style={{ marginLeft: "auto", display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap" }}>
@@ -108,7 +114,7 @@ export function PostCard({ post, showStatus }: { post: PostItem; showStatus?: bo
           style={{
             color: "var(--text-2)",
             fontSize: 13.75,
-            lineHeight: 1.65,
+            lineHeight: 1.66,
             display: "-webkit-box",
             WebkitLineClamp: 2,
             WebkitBoxOrient: "vertical",
@@ -127,7 +133,7 @@ export function PostCard({ post, showStatus }: { post: PostItem; showStatus?: bo
           alignItems: "center",
           gap: 8,
           flexWrap: "wrap",
-          paddingTop: 6,
+          paddingTop: 8,
           marginTop: 2,
           borderTop: "1px solid var(--border)",
         }}
@@ -146,7 +152,7 @@ export function PostCard({ post, showStatus }: { post: PostItem; showStatus?: bo
           style={{
             marginLeft: "auto",
             display: "flex",
-            gap: 14,
+            gap: 12,
             alignItems: "center",
             color: "var(--text-3)",
             fontSize: 12.5,
@@ -164,15 +170,18 @@ export function PostCard({ post, showStatus }: { post: PostItem; showStatus?: bo
               display: "inline-flex",
               alignItems: "center",
               gap: 4,
+              padding: post.is_liked ? "1px 7px" : undefined,
+              borderRadius: 999,
+              background: post.is_liked ? "var(--brand-soft)" : undefined,
               color: post.is_liked ? "var(--brand)" : undefined,
               fontWeight: post.is_liked ? 620 : undefined,
             }}
           >
-            <IconThumbUp size={14} /> {fmtCount(post.like_count)}
+            <IconThumbUp size={13.5} /> {fmtCount(post.like_count)}
           </span>
         </div>
       </div>
-    </article>
+    </motion.article>
   );
 }
 
@@ -218,8 +227,8 @@ export function PostList({
   return (
     <>
       <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
-        {posts.map((p) => (
-          <PostCard key={p.id} post={p} showStatus={showStatus} />
+        {posts.map((p, idx) => (
+          <PostCard key={p.id} post={p} showStatus={showStatus} index={idx} />
         ))}
       </div>
       {page !== undefined && pageSize !== undefined && total !== undefined && onPageChange && (

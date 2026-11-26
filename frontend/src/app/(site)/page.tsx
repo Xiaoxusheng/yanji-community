@@ -1,28 +1,40 @@
 "use client";
 
-// 首页：精致社区导览条 + 信息流 + 实时积分签到/公告/热签/版块侧栏（自适应折叠）。
+// 首页：网格纹理编辑风导览横幅 + Framer Motion 弹簧滑动信息流 Tab + 可展开公告 + 实时积分签到/活跃版块/热签侧栏。
 import Link from "next/link";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { motion } from "framer-motion";
 import { api, fmtCount, timeAgo, type PageData } from "@/lib/api";
 import type { PostItem, Announcement, Tag, Category, PointAccount } from "@/lib/types";
 import { PostList } from "@/components/post/PostCard";
 import { useMe } from "@/lib/auth";
 import { toast } from "@/lib/toast";
-import { IconAward, IconCheck, IconGrid, IconHash, IconPlus } from "@/components/ui/Icons";
+import {
+  IconAward,
+  IconCheck,
+  IconClock,
+  IconCompass,
+  IconFlame,
+  IconGrid,
+  IconHash,
+  IconPlus,
+  IconSparkles,
+} from "@/components/ui/Icons";
 
 const tabs = [
-  { key: "recommended", label: "推荐" },
-  { key: "latest", label: "最新" },
-  { key: "hot", label: "热门" },
-  { key: "featured", label: "精华" },
-  { key: "following", label: "关注" },
+  { key: "recommended", label: "推荐", icon: IconSparkles },
+  { key: "latest", label: "最新", icon: IconClock },
+  { key: "hot", label: "热门", icon: IconFlame },
+  { key: "featured", label: "精华", icon: IconAward },
+  { key: "following", label: "关注", icon: IconCompass },
 ];
 
 export default function HomePage() {
   const [tab, setTab] = useState("recommended");
   const [page, setPage] = useState(1);
   const [checkingIn, setCheckingIn] = useState(false);
+  const [expandedAnnId, setExpandedAnnId] = useState<number | null>(null);
   const qc = useQueryClient();
   const { data: me } = useMe();
   const isFollowingTab = tab === "following";
@@ -69,14 +81,35 @@ export default function HomePage() {
   };
 
   const acc = pointsAcc.data?.account;
-  const topCats = (categories.data?.items ?? []).slice(0, 5);
+  const allCats = categories.data?.items ?? [];
+  const topCats = allCats.slice(0, 5);
+  const streakPct = acc ? Math.min(100, Math.round(((acc.streak_days % 7 || (acc.streak_days >= 7 ? 7 : 0)) / 7) * 100)) : 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      {/* 顶部克制编辑风导览横幅 */}
-      <section className="surface-hero" style={{ padding: "20px 24px" }}>
+      {/* 顶部克制编辑风导览横幅（带极浅点阵纹理） */}
+      <motion.section
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+        className="surface-hero"
+        style={{ padding: "22px 24px" }}
+      >
+        <div
+          aria-hidden
+          className="bg-grid-subtle"
+          style={{
+            position: "absolute",
+            inset: 0,
+            opacity: 0.45,
+            maskImage: "linear-gradient(120deg, transparent 25%, black 100%)",
+            WebkitMaskImage: "linear-gradient(120deg, transparent 25%, black 100%)",
+            pointerEvents: "none",
+          }}
+        />
         <div
           style={{
+            position: "relative",
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
@@ -84,25 +117,32 @@ export default function HomePage() {
             flexWrap: "wrap",
           }}
         >
-          <div style={{ maxWidth: 620 }}>
+          <div style={{ maxWidth: 640 }}>
             <div
               style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
                 fontSize: 11.5,
                 fontWeight: 650,
-                letterSpacing: "0.08em",
+                letterSpacing: "0.06em",
                 textTransform: "uppercase",
                 color: "var(--brand)",
-                marginBottom: 4,
+                background: "var(--brand-soft)",
+                padding: "3px 10px",
+                borderRadius: 999,
+                marginBottom: 8,
               }}
             >
-              YANJI COMMUNITY
+              <IconSparkles size={12} />
+              <span>YANJI COMMUNITY</span>
             </div>
-            <h1 style={{ fontSize: 22, fontWeight: 740, letterSpacing: "-0.025em", lineHeight: 1.3, margin: 0 }}>
+            <h1 style={{ fontSize: 22.5, fontWeight: 750, letterSpacing: "-0.028em", lineHeight: 1.3, margin: 0 }}>
               {me?.authenticated && me.user
                 ? `欢迎回来，${me.user.username}`
                 : "理性交流、深度思考与高价值内容沉淀"}
             </h1>
-            <p style={{ fontSize: 13.5, color: "var(--text-2)", margin: "6px 0 0", lineHeight: 1.55 }}>
+            <p style={{ fontSize: 13.75, color: "var(--text-2)", margin: "6px 0 0", lineHeight: 1.6 }}>
               涵盖技术研讨、长文专栏、问答采纳、社区投票与线下活动。在这里与同频的思考者展开对话。
             </p>
           </div>
@@ -120,16 +160,17 @@ export default function HomePage() {
         {topCats.length > 0 && (
           <div
             style={{
+              position: "relative",
               display: "flex",
               alignItems: "center",
               gap: 7,
-              marginTop: 15,
-              paddingTop: 13,
+              marginTop: 16,
+              paddingTop: 14,
               borderTop: "1px solid var(--border)",
               flexWrap: "wrap",
             }}
           >
-            <span style={{ fontSize: 12, color: "var(--text-3)", fontWeight: 550 }}>精选版块：</span>
+            <span style={{ fontSize: 12, color: "var(--text-3)", fontWeight: 560 }}>精选版块：</span>
             {topCats.map((c) => (
               <Link key={c.id} href={`/c/${c.slug}`} className="tag tag-outline" style={{ background: "var(--bg-card)" }}>
                 <span>{c.name}</span>
@@ -138,9 +179,12 @@ export default function HomePage() {
                 </span>
               </Link>
             ))}
+            <span className="tabular-nums hide-mobile" style={{ marginLeft: "auto", fontSize: 12, color: "var(--text-3)" }}>
+              {allCats.length} 个主题版块 · 按 <kbd className="kbd-chip" style={{ margin: "0 2px" }}>⌘K</kbd> 随时检索
+            </span>
           </div>
         )}
-      </section>
+      </motion.section>
 
       <div className="layout-main-rail">
         <div>
@@ -154,21 +198,59 @@ export default function HomePage() {
               flexWrap: "wrap",
             }}
           >
+            {/* Framer Motion 弹簧滑动分段切换器 */}
             <div className="seg-tabs" role="tablist" aria-label="信息流切换" style={{ overflowX: "auto", maxWidth: "100%" }}>
-              {tabs.map((t) => (
-                <button
-                  key={t.key}
-                  role="tab"
-                  aria-selected={tab === t.key}
-                  className="seg-tab"
-                  onClick={() => {
-                    setTab(t.key);
-                    setPage(1);
-                  }}
-                >
-                  {t.label}
-                </button>
-              ))}
+              {tabs.map((t) => {
+                const active = tab === t.key;
+                const Icon = t.icon;
+                return (
+                  <button
+                    key={t.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => {
+                      setTab(t.key);
+                      setPage(1);
+                    }}
+                    style={{
+                      position: "relative",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 5,
+                      padding: "6.5px 13px",
+                      borderRadius: 7,
+                      border: "none",
+                      background: "transparent",
+                      color: active ? "var(--text-1)" : "var(--text-2)",
+                      fontSize: 13,
+                      fontWeight: active ? 620 : 500,
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                      transition: "color 0.15s ease",
+                    }}
+                  >
+                    {active && (
+                      <motion.span
+                        layoutId="home-feed-tab-pill"
+                        transition={{ type: "spring", stiffness: 460, damping: 34 }}
+                        style={{
+                          position: "absolute",
+                          inset: 0,
+                          borderRadius: 7,
+                          background: "var(--bg-card)",
+                          boxShadow: "0 1px 3px rgba(15, 23, 42, 0.08), 0 0 0 1px var(--border)",
+                          zIndex: 0,
+                        }}
+                      />
+                    )}
+                    <span style={{ position: "relative", zIndex: 1, display: "inline-flex", alignItems: "center", gap: 5 }}>
+                      <Icon size={13.5} style={{ color: active ? "var(--brand)" : "var(--text-3)" }} />
+                      {t.label}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
             {feed.data && (
               <span className="tabular-nums hide-mobile" style={{ fontSize: 12.5, color: "var(--text-3)" }}>
@@ -218,18 +300,33 @@ export default function HomePage() {
               </div>
               {acc ? (
                 <>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
                     <div className="stat-tile">
-                      <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text-1)" }}>
+                      <div style={{ fontSize: 14, fontWeight: 720, color: "var(--text-1)" }}>
                         Lv.{acc.level.level}
                       </div>
                       <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 2 }}>{acc.level.name}</div>
                     </div>
                     <div className="stat-tile">
-                      <div className="tabular-nums" style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text-1)" }}>
+                      <div className="tabular-nums" style={{ fontSize: 14, fontWeight: 720, color: "var(--text-1)" }}>
                         {acc.streak_days} 天
                       </div>
                       <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 2 }}>连续签到</div>
+                    </div>
+                  </div>
+                  {/* 7 日连签周期进度微条 */}
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--text-3)", marginBottom: 4 }}>
+                      <span>七日之约勋章进度</span>
+                      <span className="tabular-nums">{Math.min(acc.streak_days, 7)} / 7 天</span>
+                    </div>
+                    <div style={{ height: 5, borderRadius: 999, background: "var(--bg-hover)", overflow: "hidden" }}>
+                      <motion.div
+                        initial={{ width: 0 }}
+                        animate={{ width: `${streakPct}%` }}
+                        transition={{ type: "spring", stiffness: 200, damping: 24 }}
+                        style={{ height: "100%", borderRadius: 999, background: "var(--brand-gradient)" }}
+                      />
                     </div>
                   </div>
                   <button
@@ -250,7 +347,7 @@ export default function HomePage() {
                   </button>
                 </>
               ) : (
-                <div className="skeleton" style={{ height: 74 }} />
+                <div className="skeleton" style={{ height: 84 }} />
               )}
             </section>
           ) : (
@@ -272,6 +369,7 @@ export default function HomePage() {
             </section>
           )}
 
+          {/* 站点公告：支持点击展开/收起全文 */}
           <section className="card" style={{ padding: 18 }}>
             <h3 style={{ fontSize: 13.5, fontWeight: 680, marginBottom: 12, color: "var(--text-1)", display: "flex", alignItems: "center", gap: 7 }}>
               <span style={{ width: 6, height: 6, borderRadius: 999, background: "var(--brand)" }} aria-hidden />
@@ -283,36 +381,76 @@ export default function HomePage() {
               <div style={{ color: "var(--text-3)", fontSize: 13 }}>暂无新公告</div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
-                {announcements.data!.items.slice(0, 3).map((a, idx, arr) => (
-                  <div
-                    key={a.id}
-                    style={{
-                      paddingBottom: idx < arr.length - 1 ? 10 : 0,
-                      borderBottom: idx < arr.length - 1 ? "1px solid var(--border)" : "none",
-                    }}
-                  >
-                    <div style={{ fontSize: 13.5, fontWeight: 600, lineHeight: 1.4 }}>{a.title}</div>
-                    {a.body && (
-                      <div
+                {announcements.data!.items.slice(0, 3).map((a, idx, arr) => {
+                  const expanded = expandedAnnId === a.id;
+                  return (
+                    <div
+                      key={a.id}
+                      style={{
+                        paddingBottom: idx < arr.length - 1 ? 10 : 0,
+                        borderBottom: idx < arr.length - 1 ? "1px solid var(--border)" : "none",
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setExpandedAnnId(expanded ? null : a.id)}
                         style={{
-                          fontSize: 12.5,
-                          color: "var(--text-2)",
-                          marginTop: 3,
-                          lineHeight: 1.55,
-                          display: "-webkit-box",
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: "vertical",
-                          overflow: "hidden",
+                          width: "100%",
+                          textAlign: "left",
+                          background: "none",
+                          border: "none",
+                          padding: 0,
+                          cursor: a.body ? "pointer" : "default",
+                          color: "inherit",
                         }}
                       >
-                        {a.body}
+                        <div style={{ fontSize: 13.5, fontWeight: 620, lineHeight: 1.4 }}>{a.title}</div>
+                        {a.body && (
+                          <div
+                            style={{
+                              fontSize: 12.5,
+                              color: "var(--text-2)",
+                              marginTop: 4,
+                              lineHeight: 1.58,
+                              whiteSpace: expanded ? "pre-wrap" : undefined,
+                              ...(expanded
+                                ? {}
+                                : {
+                                    display: "-webkit-box",
+                                    WebkitLineClamp: 2,
+                                    WebkitBoxOrient: "vertical",
+                                    overflow: "hidden",
+                                  }),
+                            }}
+                          >
+                            {a.body}
+                          </div>
+                        )}
+                      </button>
+                      <div
+                        className="tabular-nums"
+                        style={{
+                          fontSize: 11.5,
+                          color: "var(--text-3)",
+                          marginTop: 4,
+                          display: "flex",
+                          justifyContent: "space-between",
+                        }}
+                      >
+                        <span>{timeAgo(a.published_at)}</span>
+                        {a.body && a.body.length > 48 && (
+                          <button
+                            type="button"
+                            onClick={() => setExpandedAnnId(expanded ? null : a.id)}
+                            style={{ background: "none", border: "none", padding: 0, color: "var(--brand)", fontSize: 11.5, cursor: "pointer" }}
+                          >
+                            {expanded ? "收起" : "展开"}
+                          </button>
+                        )}
                       </div>
-                    )}
-                    <div className="tabular-nums" style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 4 }}>
-                      {timeAgo(a.published_at)}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </section>
@@ -322,12 +460,12 @@ export default function HomePage() {
               <h3 style={{ fontSize: 13.5, fontWeight: 680, display: "inline-flex", alignItems: "center", gap: 6 }}>
                 <IconGrid size={14} style={{ color: "var(--text-3)" }} /> 活跃版块
               </h3>
-              <Link href="/categories" style={{ fontSize: 12.5, color: "var(--brand)", fontWeight: 550 }}>
+              <Link href="/categories" style={{ fontSize: 12.5, color: "var(--brand)", fontWeight: 560 }}>
                 全部 →
               </Link>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-              {(categories.data?.items ?? []).slice(0, 6).map((c) => (
+              {allCats.slice(0, 6).map((c) => (
                 <Link key={c.id} href={`/c/${c.slug}`} className="rail-link">
                   <span style={{ fontWeight: 550 }}>{c.name}</span>
                   <span className="tag tabular-nums" style={{ fontSize: 11.5, padding: "1px 8px" }}>

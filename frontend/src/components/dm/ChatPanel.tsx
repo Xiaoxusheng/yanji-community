@@ -1,8 +1,10 @@
 "use client";
 
+// 一对一私信聊天面板：品牌渐变气泡、居中撤回微胶囊、悬停操作栏、图片灯箱与 Framer Motion 入场动效。
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
+import { motion } from "framer-motion";
 import { api, fileURL, timeAgo, type PageData } from "@/lib/api";
 import type { Conversation, DmMessage } from "@/lib/types";
 import { Avatar } from "@/components/ui/Avatar";
@@ -10,7 +12,7 @@ import { ListSkeleton } from "@/components/ui/States";
 import { ConfirmDialog, ImageLightbox } from "@/components/ui/Dialog";
 import { ReportDialog } from "@/components/report/ReportDialog";
 import { toast } from "@/lib/toast";
-import { IconArrowLeft, IconBell, IconBellOff, IconImage, IconPin, IconX } from "@/components/ui/Icons";
+import { IconArrowLeft, IconBell, IconBellOff, IconImage, IconPin, IconSend, IconX } from "@/components/ui/Icons";
 
 export function ChatPanel({ conv, onBack }: { conv: Conversation; onBack?: () => void }) {
   const qc = useQueryClient();
@@ -92,15 +94,24 @@ export function ChatPanel({ conv, onBack }: { conv: Conversation; onBack?: () =>
   const list = [...(messages.data?.items ?? [])].reverse();
 
   return (
-    <div className="card" style={{ display: "flex", flexDirection: "column", height: 580 }}>
+    <div className="card" style={{ display: "flex", flexDirection: "column", height: 600, overflow: "hidden" }}>
       {/* 头部 */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", borderBottom: "1px solid var(--border)" }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "12px 16px",
+          borderBottom: "1px solid var(--border)",
+          background: "var(--bg-card)",
+        }}
+      >
         <button className="btn btn-icon dm-back-btn" onClick={onBack} aria-label="返回会话列表" style={{ display: "none" }}>
           <IconArrowLeft size={16} />
         </button>
-        <Avatar name={conv.other.display_name} avatarKey={conv.other.avatar_key} size={32} link={`/u/${conv.other.username}`} />
+        <Avatar name={conv.other.display_name} avatarKey={conv.other.avatar_key} size={34} link={`/u/${conv.other.username}`} />
         <div style={{ minWidth: 0 }}>
-          <Link href={`/u/${conv.other.username}`} style={{ fontWeight: 650, fontSize: 14.5 }}>
+          <Link href={`/u/${conv.other.username}`} style={{ fontWeight: 660, fontSize: 14.5 }}>
             {conv.other.display_name}
           </Link>
           <div style={{ fontSize: 11.5, color: "var(--text-3)" }}>@{conv.other.username}</div>
@@ -110,7 +121,7 @@ export function ChatPanel({ conv, onBack }: { conv: Conversation; onBack?: () =>
             className="btn btn-icon"
             title={conv.muted ? "取消免打扰" : "免打扰"}
             aria-label="免打扰切换"
-            style={{ color: conv.muted ? "var(--brand)" : undefined }}
+            style={{ color: conv.muted ? "var(--brand)" : undefined, background: conv.muted ? "var(--brand-soft)" : undefined }}
             onClick={async () => {
               try {
                 await api.patch(`/conversations/${conv.id}/settings`, { muted: !conv.muted });
@@ -126,7 +137,7 @@ export function ChatPanel({ conv, onBack }: { conv: Conversation; onBack?: () =>
             className="btn btn-icon"
             title={conv.pinned ? "取消置顶" : "置顶会话"}
             aria-label="置顶切换"
-            style={{ color: conv.pinned ? "var(--brand)" : undefined }}
+            style={{ color: conv.pinned ? "var(--brand)" : undefined, background: conv.pinned ? "var(--brand-soft)" : undefined }}
             onClick={async () => {
               try {
                 await api.patch(`/conversations/${conv.id}/settings`, { pinned: !conv.pinned });
@@ -142,90 +153,138 @@ export function ChatPanel({ conv, onBack }: { conv: Conversation; onBack?: () =>
       </div>
 
       {/* 消息列表 */}
-      <div style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          padding: 16,
+          display: "flex",
+          flexDirection: "column",
+          gap: 11,
+          background: "var(--bg-subtle)",
+        }}
+      >
         {messages.isLoading && <ListSkeleton count={2} />}
         {!messages.isLoading && list.length === 0 && (
           <div style={{ textAlign: "center", color: "var(--text-3)", margin: "auto", fontSize: 13.5 }}>
-            和 {conv.other.display_name} 开始对话
+            和 {conv.other.display_name} 打个招呼，开始对话吧
           </div>
         )}
-        {list.map((m) => (
-          <div key={m.id} style={{ display: "flex", justifyContent: m.mine ? "flex-end" : "flex-start" }}>
-            <div
-              style={{
-                maxWidth: "74%",
-                background: m.mine ? "var(--ink-btn)" : "var(--bg-inset)",
-                color: m.mine ? "var(--ink-btn-text)" : "var(--text-1)",
-                border: m.mine ? "none" : "1px solid var(--border)",
-                borderRadius: m.mine ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
-                padding: "9px 13px",
-                fontSize: 14,
-                lineHeight: 1.55,
-                wordBreak: "break-word",
-              }}
+        {list.map((m) =>
+          m.status === "recalled" ? (
+            <div key={m.id} style={{ display: "flex", justifyContent: "center" }}>
+              <span
+                style={{
+                  fontSize: 12,
+                  color: "var(--text-3)",
+                  background: "var(--bg-inset)",
+                  border: "1px solid var(--border)",
+                  padding: "3px 12px",
+                  borderRadius: 999,
+                }}
+              >
+                {m.mine ? "你撤回了一条消息" : "对方撤回了一条消息"}
+              </span>
+            </div>
+          ) : (
+            <motion.div
+              key={m.id}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.18 }}
+              className="dm-bubble-wrap"
+              style={{ display: "flex", flexDirection: "column", alignItems: m.mine ? "flex-end" : "flex-start" }}
             >
-              {m.reply_body && (
-                <div style={{ fontSize: 12, opacity: 0.72, borderLeft: "2px solid currentColor", paddingLeft: 8, marginBottom: 5 }}>
-                  {m.reply_body}
-                </div>
-              )}
-              {m.status === "recalled" ? (
-                <span style={{ opacity: 0.6, fontStyle: "italic", fontSize: 13 }}>消息已撤回</span>
-              ) : (
-                <>
-                  {m.body_text !== "[图片]" && <div>{m.body_text}</div>}
-                  {m.image_key && (
-                    <img
-                      src={fileURL(m.image_key) ?? ""}
-                      alt="图片消息"
-                      onClick={() => setLightboxSrc(fileURL(m.image_key ?? ""))}
-                      style={{
-                        maxWidth: 240,
-                        borderRadius: 8,
-                        display: "block",
-                        marginTop: m.body_text && m.body_text !== "[图片]" ? 6 : 0,
-                        cursor: "zoom-in",
-                      }}
-                    />
-                  )}
-                </>
-              )}
-              <div className="tabular-nums" style={{ fontSize: 11, opacity: 0.62, marginTop: 4, display: "flex", gap: 8, alignItems: "center" }}>
-                <span>{timeAgo(m.created_at)}</span>
-                {m.status === "sent" && (
-                  <button
-                    onClick={() => setReplyTo(m)}
-                    style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", fontSize: 11 }}
+              <div
+                style={{
+                  maxWidth: "74%",
+                  background: m.mine ? "var(--brand-gradient)" : "var(--bg-card)",
+                  color: m.mine ? "#ffffff" : "var(--text-1)",
+                  border: m.mine ? "none" : "1px solid var(--border)",
+                  boxShadow: m.mine ? "0 3px 10px rgba(59, 91, 219, 0.22)" : "var(--shadow-card)",
+                  borderRadius: m.mine ? "15px 15px 4px 15px" : "15px 15px 15px 4px",
+                  padding: "10px 14px",
+                  fontSize: 14,
+                  lineHeight: 1.58,
+                  wordBreak: "break-word",
+                }}
+              >
+                {m.reply_body && (
+                  <div
+                    style={{
+                      fontSize: 12,
+                      opacity: 0.82,
+                      borderLeft: `2px solid ${m.mine ? "rgba(255,255,255,0.65)" : "var(--brand)"}`,
+                      paddingLeft: 8,
+                      marginBottom: 6,
+                    }}
                   >
-                    引用
-                  </button>
+                    {m.reply_body}
+                  </div>
                 )}
-                {m.mine && m.status === "sent" && (
+                {m.body_text !== "[图片]" && <div>{m.body_text}</div>}
+                {m.image_key && (
+                  <img
+                    src={fileURL(m.image_key) ?? ""}
+                    alt="图片消息"
+                    onClick={() => setLightboxSrc(fileURL(m.image_key ?? ""))}
+                    style={{
+                      maxWidth: 240,
+                      borderRadius: 9,
+                      display: "block",
+                      marginTop: m.body_text && m.body_text !== "[图片]" ? 6 : 0,
+                      cursor: "zoom-in",
+                    }}
+                  />
+                )}
+              </div>
+              <div
+                className="tabular-nums dm-bubble-actions"
+                style={{
+                  fontSize: 11,
+                  color: "var(--text-3)",
+                  marginTop: 4,
+                  padding: "0 4px",
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                }}
+              >
+                <span>{timeAgo(m.created_at)}</span>
+                <button
+                  type="button"
+                  onClick={() => setReplyTo(m)}
+                  style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", fontSize: 11, padding: 0 }}
+                >
+                  引用
+                </button>
+                {m.mine ? (
                   <button
+                    type="button"
                     onClick={() => setRecallTarget(m.id)}
-                    style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", fontSize: 11 }}
+                    style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", fontSize: 11, padding: 0 }}
                   >
                     撤回
                   </button>
-                )}
-                {!m.mine && m.status === "sent" && (
+                ) : (
                   <button
+                    type="button"
                     onClick={() => setReportTargetId(String(m.id))}
-                    style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", fontSize: 11 }}
+                    style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", fontSize: 11, padding: 0 }}
                   >
                     举报
                   </button>
                 )}
               </div>
-            </div>
-          </div>
-        ))}
+            </motion.div>
+          ),
+        )}
         <div ref={bottomRef} />
       </div>
 
       {/* 引用预览 */}
       {replyTo && (
-        <div style={{ padding: "6px 14px", background: "var(--bg-inset)", borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+        <div style={{ padding: "7px 14px", background: "var(--bg-inset)", borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
           <span style={{ color: "var(--text-2)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             引用：{replyTo.body_text || "[图片]"}
           </span>
@@ -236,7 +295,7 @@ export function ChatPanel({ conv, onBack }: { conv: Conversation; onBack?: () =>
       )}
 
       {/* 输入区 */}
-      <div style={{ display: "flex", gap: 8, padding: 12, borderTop: "1px solid var(--border)", alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 8, padding: 12, borderTop: "1px solid var(--border)", alignItems: "center", background: "var(--bg-card)" }}>
         <label
           className="btn btn-icon"
           title="发送图片"
@@ -264,7 +323,7 @@ export function ChatPanel({ conv, onBack }: { conv: Conversation; onBack?: () =>
           className="input"
           value={text}
           maxLength={5000}
-          placeholder="输入消息…（Enter 发送）"
+          placeholder="输入消息…（按 Enter 快速发送）"
           aria-label="消息输入框"
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
@@ -274,8 +333,9 @@ export function ChatPanel({ conv, onBack }: { conv: Conversation; onBack?: () =>
             }
           }}
         />
-        <button className="btn btn-primary btn-sm" onClick={submit} disabled={send.isPending || !text.trim()}>
-          {send.isPending ? "发送中…" : "发送"}
+        <button className="btn btn-brand btn-sm" onClick={submit} disabled={send.isPending || !text.trim()}>
+          <IconSend size={14} />
+          <span>{send.isPending ? "发送中" : "发送"}</span>
         </button>
       </div>
 

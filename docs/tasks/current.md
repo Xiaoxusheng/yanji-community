@@ -129,3 +129,10 @@
   - 新增/扩充 `httpx/security_test.go`、`server/security_test.go`、`markdown/markdown_test.go`、`storage/storage_test.go`、`moderation/moderation_test.go`、`search/search_test.go`、`auth/security_test.go`、`notifications/stream_test.go`。
   - 后端：`gofmt`、`go vet ./...`、`go vet -tags integration ./tests/...`、`go build ./...`、`go test -count=1 ./...`（14 个含测试包全绿，0 FAIL）✅。
   - 前端：`npm run lint`（0 error）、`npx tsc --noEmit`、`npm run build`（Next 15.5.29，36/36 路由构建通过）✅；`npm audit --omit=dev` 生产依赖 0 漏洞 ✅。
+
+### UI 框架化升级与交互细节精修（本次完成）
+- **引入现代 UI / 动效框架**：在 `frontend/package.json` 集成 `lucide-react`、`framer-motion`、`sonner`、`@radix-ui/react-dialog`、`@radix-ui/react-dropdown-menu`（生产依赖保持 0 漏洞）。
+- **基础组件重构**：`Icons.tsx` 全量迁移至 Lucide 1.75px 设计级矢量图标并兼容既有导出名；`toast.tsx` 迁移至 Sonner 堆叠通知并动态同步深浅色主题；`Dialog.tsx` 升级为 Radix UI Dialog + Framer Motion（Portal 挂载、焦点/滚动锁定、弹性入退场）；`providers.tsx` 接入 `<MotionConfig reducedMotion="user">`。
+- **全局 `⌘K` 命令面板与导航细节**：新增 `CommandPalette.tsx`（支持防抖检索帖子/成员、快捷页面与主题切换、完整 `↑/↓/Enter/Esc` 键盘操控）；`SiteChrome.tsx` 升级为 Framer Motion 弹簧滑动导航胶囊、Radix DropdownMenu 用户菜单、`/me/profile` 真实头像同步、移动端渐变悬浮发布按钮与弹性返回顶部按钮。
+- **核心页面与边界细节修复**：首页增加点阵网格纹理导览条、弹簧滑动 Tab、七日连签进度条及可点击展开/收起公告全文；`CommentTree.tsx` 补齐 `hidden` 隐藏评论的规范占位与禁交互处理；`PollBox.tsx` 升级弹簧进度条、单/多选指示器与“领先”徽章；`ChatPanel.tsx` 升级品牌渐变气泡、居中撤回微胶囊与悬停操作栏；`activities/page.tsx` 升级撕页日历卡片与容量进度条；`notifications/page.tsx` 升级弹簧 Tab 与未读微渐变强调。
+- **全量验证**：`npm run lint`（0 error）、`npx tsc --noEmit`、`npm run build`（Next.js 15.5.29，36/36 路由全绿）✅。

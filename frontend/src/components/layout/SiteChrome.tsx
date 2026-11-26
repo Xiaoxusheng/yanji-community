@@ -1,20 +1,23 @@
 "use client";
 
-// 全站头部（磨砂顶栏、实时搜索联想 & Ctrl+K、主题切换、通知/私信、用户菜单）、页脚与移动端底部导航。
+// 全站头部（磨砂顶栏、Framer Motion 滑动导航胶囊、⌘K 命令面板、Radix 下拉菜单、真实头像同步）、页脚与移动端底部导航。
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { AnimatePresence, motion } from "framer-motion";
 import { useInvalidateMe, useMe, useUnreadCount } from "@/lib/auth";
-import { api, API_BASE, fmtCount, type PageData } from "@/lib/api";
-import type { SearchPostResult } from "@/lib/types";
+import { api, API_BASE, fmtCount } from "@/lib/api";
 import { toast } from "@/lib/toast";
 import { Avatar } from "@/components/ui/Avatar";
+import { CommandPalette } from "@/components/layout/CommandPalette";
 import {
   IconArrowUp,
   IconAward,
   IconBell,
   IconBookmark,
+  IconChevronDown,
   IconFileText,
   IconGrid,
   IconHome,
@@ -27,7 +30,6 @@ import {
   IconShield,
   IconSun,
   IconUser,
-  IconX,
 } from "@/components/ui/Icons";
 
 // SSE 实时通知（断线自动重连由 EventSource 内建；消息本体以接口补拉为准）
@@ -59,7 +61,16 @@ function useDmUnread(enabled: boolean) {
   });
 }
 
-function ThemeToggle() {
+function useMyMiniProfile(enabled: boolean) {
+  return useQuery({
+    queryKey: ["me-profile"],
+    enabled,
+    staleTime: 60_000,
+    queryFn: () => api.get<{ profile: { display_name: string; avatar_key: string } }>("/me/profile"),
+  });
+}
+
+function useThemeState() {
   const [dark, setDark] = useState(false);
 
   useEffect(() => {
@@ -83,103 +94,46 @@ function ThemeToggle() {
     setDark(!dark);
   };
 
-  return (
-    <button
-      type="button"
-      className="btn btn-icon"
-      onClick={toggle}
-      title={dark ? "切换到浅色模式" : "切换到深色模式"}
-      aria-label={dark ? "切换到浅色模式" : "切换到深色模式"}
-    >
-      {dark ? <IconSun size={17} /> : <IconMoon size={17} />}
-    </button>
-  );
+  return { dark, toggle };
 }
 
 export function SiteHeader() {
   const router = useRouter();
   const pathname = usePathname();
   const { data: me } = useMe();
-  const { data: unread } = useUnreadCount(!!me?.authenticated);
-  const { data: dmUnread } = useDmUnread(!!me?.authenticated);
-  useNotificationStream(!!me?.authenticated);
+  const authed = !!me?.authenticated;
+  const { data: unread } = useUnreadCount(authed);
+  const { data: dmUnread } = useDmUnread(authed);
+  const { data: myProfile } = useMyMiniProfile(authed);
+  useNotificationStream(authed);
   const invalidate = useInvalidateMe();
+  const { dark, toggle: toggleTheme } = useThemeState();
 
-  const [q, setQ] = useState("");
-  const [debouncedQ, setDebouncedQ] = useState("");
-  const [searchFocused, setSearchFocused] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
-
-  const searchRef = useRef<HTMLInputElement>(null);
-  const searchBoxRef = useRef<HTMLDivElement>(null);
-  const menuBoxRef = useRef<HTMLDivElement>(null);
+  const [cmdOpen, setCmdOpen] = useState(false);
 
   const user = me?.authenticated ? me.user : null;
+  const displayName = myProfile?.profile?.display_name || user?.username || "";
+  const avatarKey = myProfile?.profile?.avatar_key || "";
 
-  // 防抖即时联想搜索
-  useEffect(() => {
-    const t = setTimeout(() => setDebouncedQ(q.trim()), 220);
-    return () => clearTimeout(t);
-  }, [q]);
-
-  const quickPosts = useQuery({
-    enabled: searchFocused && debouncedQ.length >= 1,
-    queryKey: ["quick-search", "post", debouncedQ],
-    queryFn: () =>
-      api.get<PageData<SearchPostResult>>(
-        `/search?q=${encodeURIComponent(debouncedQ)}&type=post&page=1&page_size=5`,
-      ),
-    staleTime: 30_000,
-  });
-
-  const quickUsers = useQuery({
-    enabled: searchFocused && debouncedQ.length >= 1,
-    queryKey: ["quick-search", "user", debouncedQ],
-    queryFn: () =>
-      api.get<PageData<{ id: string; username: string; display_name: string; avatar_key: string }>>(
-        `/search?q=${encodeURIComponent(debouncedQ)}&type=user&page=1&page_size=3`,
-      ),
-    staleTime: 30_000,
-  });
-
-  // 全局快捷键：Ctrl/Cmd + K 或 / 聚焦搜索；Esc 收起浮层
+  // 全局快捷键：Ctrl/Cmd + K 或 / 唤起命令面板
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        searchRef.current?.focus();
-        setSearchFocused(true);
+        setCmdOpen((v) => !v);
         return;
       }
-      if (e.key === "/" && !["INPUT", "TEXTAREA", "SELECT"].includes((document.activeElement?.tagName ?? ""))) {
+      if (
+        e.key === "/" &&
+        !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName ?? "") &&
+        !(document.activeElement as HTMLElement | null)?.isContentEditable
+      ) {
         e.preventDefault();
-        searchRef.current?.focus();
-        setSearchFocused(true);
-        return;
-      }
-      if (e.key === "Escape") {
-        setSearchFocused(false);
-        setMenuOpen(false);
-        searchRef.current?.blur();
+        setCmdOpen(true);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  // 点击外部收起下拉浮层
-  useEffect(() => {
-    const onClick = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (searchBoxRef.current && !searchBoxRef.current.contains(target)) {
-        setSearchFocused(false);
-      }
-      if (menuBoxRef.current && !menuBoxRef.current.contains(target)) {
-        setMenuOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
   const logout = async () => {
@@ -200,400 +154,303 @@ export function SiteHeader() {
     { href: "/help", label: "规则", match: (p: string) => p.startsWith("/help") },
   ];
 
-  const showQuick = searchFocused && debouncedQ.length >= 1;
-
   return (
-    <header
-      className="surface-glass"
-      style={{
-        borderBottom: "1px solid var(--border)",
-        position: "sticky",
-        top: 0,
-        zIndex: 100,
-      }}
-    >
-      <div className="site-container" style={{ height: 60, display: "flex", alignItems: "center", gap: 16 }}>
-        <Link
-          href="/"
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 9,
-            fontWeight: 750,
-            fontSize: 16.5,
-            letterSpacing: "-0.025em",
-            color: "var(--text-1)",
-            flexShrink: 0,
-          }}
-        >
-          <span className="brand-mark" aria-hidden>
-            研
-          </span>
-          <span>研记社区</span>
-        </Link>
-
-        <nav className="hide-mobile" style={{ display: "flex", gap: 3, alignItems: "center" }} aria-label="主导航">
-          {navItems.map((n) => {
-            const active = n.match(pathname);
-            return (
-              <Link
-                key={n.href}
-                href={n.href}
-                className="btn btn-text btn-sm"
-                style={{
-                  color: active ? "var(--text-1)" : "var(--text-2)",
-                  fontWeight: active ? 620 : 500,
-                  background: active ? "var(--bg-inset)" : undefined,
-                  border: active ? "1px solid var(--border)" : "1px solid transparent",
-                  padding: "6.5px 12px",
-                }}
-              >
-                {n.label}
-              </Link>
-            );
-          })}
-        </nav>
-
-        {/* 即时搜索框 */}
-        <div ref={searchBoxRef} style={{ position: "relative", flex: 1, maxWidth: 356, marginLeft: "auto" }}>
-          <form
-            role="search"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (q.trim()) {
-                setSearchFocused(false);
-                router.push(`/search?q=${encodeURIComponent(q.trim())}`);
-              }
+    <>
+      <header
+        className="surface-glass"
+        style={{
+          borderBottom: "1px solid var(--border)",
+          position: "sticky",
+          top: 0,
+          zIndex: 100,
+        }}
+      >
+        <div className="site-container" style={{ height: 60, display: "flex", alignItems: "center", gap: 14 }}>
+          <Link
+            href="/"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 9,
+              fontWeight: 760,
+              fontSize: 16.5,
+              letterSpacing: "-0.025em",
+              color: "var(--text-1)",
+              flexShrink: 0,
             }}
-            style={{ position: "relative", display: "flex", alignItems: "center" }}
           >
-            <span
-              style={{
-                position: "absolute",
-                left: 11,
-                color: searchFocused ? "var(--brand)" : "var(--text-3)",
-                display: "inline-flex",
-                pointerEvents: "none",
-                transition: "color 0.15s ease",
-              }}
-            >
-              <IconSearch size={15} />
+            <span className="brand-mark" aria-hidden>
+              研
             </span>
-            <input
-              ref={searchRef}
-              className="input"
-              placeholder="搜索帖子、用户、版块…"
-              value={q}
-              onFocus={() => setSearchFocused(true)}
-              onChange={(e) => setQ(e.target.value)}
-              aria-label="搜索"
-              style={{
-                padding: "7.5px 56px 7.5px 34px",
-                fontSize: 13.5,
-                background: searchFocused ? "var(--bg-card)" : "var(--bg-inset)",
-                borderColor: searchFocused ? "var(--brand)" : "var(--border)",
-                borderRadius: 10,
-              }}
-            />
-            {q ? (
-              <button
-                type="button"
-                onClick={() => setQ("")}
-                aria-label="清空搜索"
-                style={{
-                  position: "absolute",
-                  right: 9,
-                  background: "none",
-                  border: "none",
-                  color: "var(--text-3)",
-                  cursor: "pointer",
-                  display: "inline-flex",
-                  padding: 2,
-                }}
+            <span>研记社区</span>
+          </Link>
+
+          <nav className="hide-mobile" style={{ display: "flex", gap: 2, alignItems: "center" }} aria-label="主导航">
+            {navItems.map((n) => {
+              const active = n.match(pathname);
+              return (
+                <Link
+                  key={n.href}
+                  href={n.href}
+                  style={{
+                    position: "relative",
+                    padding: "6.5px 12px",
+                    borderRadius: 9,
+                    fontSize: 13.5,
+                    fontWeight: active ? 620 : 500,
+                    color: active ? "var(--text-1)" : "var(--text-2)",
+                    transition: "color 0.15s ease",
+                  }}
+                >
+                  {active && (
+                    <motion.span
+                      layoutId="header-nav-pill"
+                      transition={{ type: "spring", stiffness: 420, damping: 32 }}
+                      style={{
+                        position: "absolute",
+                        inset: 0,
+                        borderRadius: 9,
+                        background: "var(--bg-inset)",
+                        border: "1px solid var(--border)",
+                        zIndex: 0,
+                      }}
+                    />
+                  )}
+                  <span style={{ position: "relative", zIndex: 1 }}>{n.label}</span>
+                </Link>
+              );
+            })}
+          </nav>
+
+          {/* 全局 ⌘K 命令面板触发胶囊 */}
+          <button
+            type="button"
+            onClick={() => setCmdOpen(true)}
+            aria-label="打开全局搜索与命令面板"
+            style={{
+              marginLeft: "auto",
+              flex: 1,
+              maxWidth: 320,
+              height: 36,
+              padding: "0 10px 0 12px",
+              borderRadius: 10,
+              border: "1px solid var(--border-strong)",
+              background: "var(--bg-inset)",
+              color: "var(--text-3)",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              cursor: "pointer",
+              fontSize: 13,
+              transition: "border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease",
+            }}
+          >
+            <IconSearch size={14} style={{ flexShrink: 0 }} />
+            <span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              搜索帖子、成员或指令…
+            </span>
+            <kbd className="kbd-chip hide-tablet">⌘K</kbd>
+          </button>
+
+          {/* 深浅色切换（带微旋转过渡） */}
+          <button
+            type="button"
+            className="btn btn-icon"
+            onClick={toggleTheme}
+            title={dark ? "切换到浅色模式" : "切换到深色模式"}
+            aria-label={dark ? "切换到浅色模式" : "切换到深色模式"}
+          >
+            <AnimatePresence mode="wait" initial={false}>
+              <motion.span
+                key={dark ? "sun" : "moon"}
+                initial={{ opacity: 0, rotate: -35, scale: 0.8 }}
+                animate={{ opacity: 1, rotate: 0, scale: 1 }}
+                exit={{ opacity: 0, rotate: 35, scale: 0.8 }}
+                transition={{ duration: 0.16 }}
+                style={{ display: "inline-flex" }}
               >
-                <IconX size={14} />
-              </button>
-            ) : (
-              <kbd
-                className="hide-tablet"
-                style={{
-                  position: "absolute",
-                  right: 8,
-                  fontSize: 11,
-                  fontWeight: 550,
-                  color: "var(--text-3)",
-                  background: "var(--bg-card)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 6,
-                  padding: "1.5px 6px",
-                  fontFamily: "inherit",
-                  pointerEvents: "none",
-                  boxShadow: "0 1px 1px rgba(15, 23, 42, 0.04)",
-                }}
-              >
-                ⌘K
-              </kbd>
-            )}
-          </form>
+                {dark ? <IconSun size={17} /> : <IconMoon size={17} />}
+              </motion.span>
+            </AnimatePresence>
+          </button>
 
-          {showQuick && (
-            <div
-              className="card modal-panel"
-              style={{
-                position: "absolute",
-                top: "calc(100% + 8px)",
-                left: 0,
-                right: 0,
-                minWidth: 300,
-                padding: 8,
-                boxShadow: "var(--shadow-pop)",
-                zIndex: 200,
-              }}
-            >
-              {quickPosts.isLoading && (
-                <div style={{ padding: 10, fontSize: 13, color: "var(--text-3)" }}>搜索中…</div>
-              )}
-              {!quickPosts.isLoading &&
-                (quickPosts.data?.items.length ?? 0) === 0 &&
-                (quickUsers.data?.items.length ?? 0) === 0 && (
-                  <div style={{ padding: 12, fontSize: 13, color: "var(--text-3)", textAlign: "center" }}>
-                    未找到直接匹配内容
-                  </div>
-                )}
-
-              {(quickPosts.data?.items ?? []).length > 0 && (
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 650, color: "var(--text-3)", padding: "4px 10px", letterSpacing: "0.04em" }}>
-                    相关帖子
-                  </div>
-                  {quickPosts.data!.items.map((it) => (
-                    <Link
-                      key={it.id}
-                      href={`/p/${it.id}`}
-                      onClick={() => setSearchFocused(false)}
-                      className="rail-link"
-                      style={{ flexDirection: "column", alignItems: "flex-start", gap: 2 }}
-                    >
-                      <div style={{ fontWeight: 550, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {it.title}
-                      </div>
-                      <div style={{ fontSize: 11.5, color: "var(--text-3)" }}>
-                        {it.category_name} · {it.author_name}
-                      </div>
-                    </Link>
-                  ))}
-                </div>
-              )}
-
-              {(quickUsers.data?.items ?? []).length > 0 && (
-                <div style={{ marginTop: 4 }}>
-                  <div style={{ fontSize: 11, fontWeight: 650, color: "var(--text-3)", padding: "4px 10px", letterSpacing: "0.04em" }}>
-                    成员
-                  </div>
-                  {quickUsers.data!.items.map((u) => (
-                    <Link
-                      key={u.id}
-                      href={`/u/${u.username}`}
-                      onClick={() => setSearchFocused(false)}
-                      className="rail-link"
-                      style={{ justifyContent: "flex-start", gap: 8 }}
-                    >
-                      <Avatar name={u.display_name || u.username} avatarKey={u.avatar_key} size={24} />
-                      <span style={{ fontWeight: 550 }}>{u.display_name}</span>
-                      <span style={{ color: "var(--text-3)", fontSize: 12 }}>@{u.username}</span>
-                    </Link>
-                  ))}
-                </div>
-              )}
+          {user ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+              <Link href="/compose" className="btn btn-brand btn-sm hide-mobile">
+                <IconPlus size={15} />
+                <span>发布</span>
+              </Link>
 
               <Link
-                href={`/search?q=${encodeURIComponent(debouncedQ)}`}
-                onClick={() => setSearchFocused(false)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  padding: "8px 10px",
-                  marginTop: 4,
-                  borderTop: "1px solid var(--border)",
-                  fontSize: 12.5,
-                  color: "var(--brand)",
-                  fontWeight: 580,
-                }}
+                href="/messages"
+                className="btn btn-icon"
+                aria-label={`私信${dmUnread?.unread ? `（${dmUnread.unread} 条未读）` : ""}`}
+                title="私信"
+                style={{ position: "relative" }}
               >
-                <span>查看「{debouncedQ}」全部结果</span>
-                <span>Enter →</span>
+                <IconMessage size={17} />
+                {!!dmUnread?.unread && (
+                  <span
+                    className="tabular-nums"
+                    style={{
+                      position: "absolute",
+                      top: 2,
+                      right: 1,
+                      background: "var(--danger)",
+                      color: "#fff",
+                      borderRadius: 999,
+                      fontSize: 10,
+                      minWidth: 15,
+                      height: 15,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      padding: "0 4px",
+                      fontWeight: 700,
+                      boxShadow: "0 0 0 2px var(--bg-card)",
+                    }}
+                  >
+                    {dmUnread.unread > 99 ? "99+" : fmtCount(dmUnread.unread)}
+                  </span>
+                )}
+              </Link>
+
+              <Link
+                href="/notifications"
+                className="btn btn-icon"
+                aria-label={`通知${unread?.unread ? `（${unread.unread} 条未读）` : ""}`}
+                title="通知"
+                style={{ position: "relative" }}
+              >
+                <IconBell size={17} />
+                {!!unread?.unread && (
+                  <span
+                    className="tabular-nums"
+                    style={{
+                      position: "absolute",
+                      top: 2,
+                      right: 1,
+                      background: "var(--danger)",
+                      color: "#fff",
+                      borderRadius: 999,
+                      fontSize: 10,
+                      minWidth: 15,
+                      height: 15,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      padding: "0 4px",
+                      fontWeight: 700,
+                      boxShadow: "0 0 0 2px var(--bg-card)",
+                    }}
+                  >
+                    {unread.unread > 99 ? "99+" : fmtCount(unread.unread)}
+                  </span>
+                )}
+              </Link>
+
+              {/* Radix UI 无障碍下拉用户菜单 */}
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    type="button"
+                    aria-label="用户菜单"
+                    style={{
+                      background: "var(--bg-inset)",
+                      border: "1px solid var(--border)",
+                      cursor: "pointer",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 5,
+                      padding: "2px 7px 2px 3px",
+                      borderRadius: 999,
+                      color: "var(--text-2)",
+                      transition: "border-color 0.15s ease, background-color 0.15s ease",
+                    }}
+                  >
+                    <Avatar name={displayName} avatarKey={avatarKey} size={28} />
+                    <IconChevronDown size={13} className="hide-mobile" />
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content align="end" sideOffset={8} collisionPadding={12} className="radix-menu-content">
+                    <div style={{ padding: "8px 10px 10px", marginBottom: 2 }}>
+                      <div style={{ fontSize: 14, fontWeight: 660, color: "var(--text-1)" }}>{displayName}</div>
+                      <div style={{ fontSize: 12, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", marginTop: 1 }}>
+                        @{user.username} · {user.email}
+                      </div>
+                    </div>
+                    <DropdownMenu.Separator className="radix-menu-sep" />
+                    <DropdownMenu.Item asChild>
+                      <Link href={`/u/${user.username}`} className="radix-menu-item">
+                        <IconUser size={15} /> 我的主页
+                      </Link>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item asChild>
+                      <Link href="/me/posts" className="radix-menu-item">
+                        <IconFileText size={15} /> 我的内容
+                      </Link>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item asChild>
+                      <Link href="/me/bookmarks" className="radix-menu-item">
+                        <IconBookmark size={15} /> 我的收藏
+                      </Link>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item asChild>
+                      <Link href="/me/points" className="radix-menu-item">
+                        <IconAward size={15} /> 积分与签到
+                      </Link>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item asChild>
+                      <Link href="/me/appeals" className="radix-menu-item">
+                        <IconShield size={15} /> 申诉中心
+                      </Link>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item asChild>
+                      <Link href="/settings" className="radix-menu-item">
+                        <IconSettings size={15} /> 账号设置
+                      </Link>
+                    </DropdownMenu.Item>
+                    {user.can_admin && (
+                      <>
+                        <DropdownMenu.Separator className="radix-menu-sep" />
+                        <DropdownMenu.Item asChild>
+                          <Link href="/admin" className="radix-menu-item" style={{ color: "var(--brand)", fontWeight: 600 }}>
+                            <IconGrid size={15} /> 管理后台
+                          </Link>
+                        </DropdownMenu.Item>
+                      </>
+                    )}
+                    <DropdownMenu.Separator className="radix-menu-sep" />
+                    <DropdownMenu.Item onSelect={logout} className="radix-menu-item radix-menu-item-danger">
+                      <IconLogOut size={15} /> 退出登录
+                    </DropdownMenu.Item>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
+            </div>
+          ) : (
+            <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+              <Link href="/login" className="btn btn-secondary btn-sm">
+                登录
+              </Link>
+              <Link href="/register" className="btn btn-primary btn-sm">
+                注册
               </Link>
             </div>
           )}
         </div>
+      </header>
 
-        <ThemeToggle />
-
-        {user ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-            <Link href="/compose" className="btn btn-brand btn-sm hide-mobile">
-              <IconPlus size={15} />
-              <span>发布</span>
-            </Link>
-
-            <Link
-              href="/messages"
-              className="btn btn-icon"
-              aria-label={`私信${dmUnread?.unread ? `（${dmUnread.unread} 条未读）` : ""}`}
-              title="私信"
-              style={{ position: "relative" }}
-            >
-              <IconMessage size={17} />
-              {!!dmUnread?.unread && (
-                <span
-                  className="tabular-nums"
-                  style={{
-                    position: "absolute",
-                    top: 2,
-                    right: 1,
-                    background: "var(--danger)",
-                    color: "#fff",
-                    borderRadius: 999,
-                    fontSize: 10,
-                    minWidth: 15,
-                    height: 15,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    padding: "0 4px",
-                    fontWeight: 700,
-                    boxShadow: "0 0 0 2px var(--bg-card)",
-                  }}
-                >
-                  {dmUnread.unread > 99 ? "99+" : fmtCount(dmUnread.unread)}
-                </span>
-              )}
-            </Link>
-
-            <Link
-              href="/notifications"
-              className="btn btn-icon"
-              aria-label={`通知${unread?.unread ? `（${unread.unread} 条未读）` : ""}`}
-              title="通知"
-              style={{ position: "relative" }}
-            >
-              <IconBell size={17} />
-              {!!unread?.unread && (
-                <span
-                  className="tabular-nums"
-                  style={{
-                    position: "absolute",
-                    top: 2,
-                    right: 1,
-                    background: "var(--danger)",
-                    color: "#fff",
-                    borderRadius: 999,
-                    fontSize: 10,
-                    minWidth: 15,
-                    height: 15,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    padding: "0 4px",
-                    fontWeight: 700,
-                    boxShadow: "0 0 0 2px var(--bg-card)",
-                  }}
-                >
-                  {unread.unread > 99 ? "99+" : fmtCount(unread.unread)}
-                </span>
-              )}
-            </Link>
-
-            <div ref={menuBoxRef} style={{ position: "relative" }}>
-              <button
-                type="button"
-                onClick={() => setMenuOpen((v) => !v)}
-                aria-expanded={menuOpen}
-                aria-haspopup="menu"
-                aria-label="用户菜单"
-                style={{
-                  background: "none",
-                  border: menuOpen ? "2px solid var(--brand)" : "2px solid transparent",
-                  cursor: "pointer",
-                  display: "flex",
-                  padding: 1,
-                  borderRadius: 999,
-                  transition: "border-color 0.15s ease",
-                }}
-              >
-                <Avatar name={user.username} size={32} />
-              </button>
-              {menuOpen && (
-                <div
-                  role="menu"
-                  className="card modal-panel"
-                  style={{
-                    position: "absolute",
-                    right: 0,
-                    top: 44,
-                    minWidth: 212,
-                    padding: 6,
-                    boxShadow: "var(--shadow-pop)",
-                    zIndex: 210,
-                  }}
-                  onClick={() => setMenuOpen(false)}
-                >
-                  <div style={{ padding: "9px 10px 10px", borderBottom: "1px solid var(--border)", marginBottom: 4 }}>
-                    <div style={{ fontSize: 14, fontWeight: 650 }}>{user.username}</div>
-                    <div style={{ fontSize: 12, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", marginTop: 1 }}>
-                      {user.email}
-                    </div>
-                  </div>
-                  <Link href={`/u/${user.username}`} role="menuitem" className="btn btn-text btn-sm" style={{ width: "100%", justifyContent: "flex-start" }}>
-                    <IconUser size={15} /> 我的主页
-                  </Link>
-                  <Link href="/me/posts" role="menuitem" className="btn btn-text btn-sm" style={{ width: "100%", justifyContent: "flex-start" }}>
-                    <IconFileText size={15} /> 我的内容
-                  </Link>
-                  <Link href="/me/bookmarks" role="menuitem" className="btn btn-text btn-sm" style={{ width: "100%", justifyContent: "flex-start" }}>
-                    <IconBookmark size={15} /> 我的收藏
-                  </Link>
-                  <Link href="/me/points" role="menuitem" className="btn btn-text btn-sm" style={{ width: "100%", justifyContent: "flex-start" }}>
-                    <IconAward size={15} /> 积分与签到
-                  </Link>
-                  <Link href="/me/appeals" role="menuitem" className="btn btn-text btn-sm" style={{ width: "100%", justifyContent: "flex-start" }}>
-                    <IconShield size={15} /> 申诉中心
-                  </Link>
-                  <Link href="/settings" role="menuitem" className="btn btn-text btn-sm" style={{ width: "100%", justifyContent: "flex-start" }}>
-                    <IconSettings size={15} /> 账号设置
-                  </Link>
-                  {user.can_admin && (
-                    <Link href="/admin" role="menuitem" className="btn btn-text btn-sm" style={{ width: "100%", justifyContent: "flex-start", color: "var(--brand)" }}>
-                      <IconGrid size={15} /> 管理后台
-                    </Link>
-                  )}
-                  <div style={{ borderTop: "1px solid var(--border)", marginTop: 4, paddingTop: 4 }}>
-                    <button
-                      role="menuitem"
-                      onClick={logout}
-                      className="btn btn-text btn-sm"
-                      style={{ width: "100%", justifyContent: "flex-start", color: "var(--danger)" }}
-                    >
-                      <IconLogOut size={15} /> 退出登录
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-            <Link href="/login" className="btn btn-secondary btn-sm">
-              登录
-            </Link>
-            <Link href="/register" className="btn btn-primary btn-sm">
-              注册
-            </Link>
-          </div>
-        )}
-      </div>
-    </header>
+      <CommandPalette
+        open={cmdOpen}
+        onOpenChange={setCmdOpen}
+        authenticated={authed}
+        canAdmin={user?.can_admin}
+        isDark={dark}
+        onToggleTheme={toggleTheme}
+      />
+    </>
   );
 }
 
@@ -619,32 +476,34 @@ export function SiteFooter() {
           alignItems: "center",
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span className="brand-mark" style={{ width: 24, height: 24, fontSize: 12, borderRadius: 7 }} aria-hidden>
+        <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+          <span className="brand-mark" style={{ width: 26, height: 26, fontSize: 12.5, borderRadius: 8 }} aria-hidden>
             研
           </span>
           <div>
-            <div style={{ fontWeight: 650, color: "var(--text-1)", fontSize: 13.5 }}>研记社区</div>
-            <div style={{ fontSize: 12, color: "var(--text-3)" }}>理性交流 · 深度沉淀 · 共同成长</div>
+            <div style={{ fontWeight: 680, color: "var(--text-1)", fontSize: 13.5 }}>研记社区 · Yanji Community</div>
+            <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 1 }}>理性交流 · 深度沉淀 · 共同成长</div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "center" }}>
           <Link href="/categories" style={{ transition: "color 0.15s" }}>版块导航</Link>
           <Link href="/activities" style={{ transition: "color 0.15s" }}>社区活动</Link>
+          <Link href="/search" style={{ transition: "color 0.15s" }}>高级搜索</Link>
           <Link href="/help" style={{ transition: "color 0.15s" }}>社区规则</Link>
-          <Link href="/help#roadmap" style={{ transition: "color 0.15s" }}>后续规划</Link>
         </div>
       </div>
     </footer>
   );
 }
 
-/** 移动端底部导航（<640px 生效） */
+/** 移动端底部导航（<640px 生效，中间发布按钮使用品牌渐变悬浮胶囊） */
 export function MobileBottomNav() {
   const pathname = usePathname();
   const { data: me } = useMe();
   const { data: dmUnread } = useDmUnread(!!me?.authenticated);
+  const { data: notifUnread } = useUnreadCount(!!me?.authenticated);
   const user = me?.authenticated ? me.user : null;
+  const msgHasUnread = !!(dmUnread?.unread || notifUnread?.unread);
 
   return (
     <nav className="mobile-bottom-nav" aria-label="移动端底部导航">
@@ -652,18 +511,33 @@ export function MobileBottomNav() {
         <IconHome size={19} />
         <span>首页</span>
       </Link>
-      <Link href="/categories" style={{ color: pathname.startsWith("/categories") || pathname.startsWith("/c/") ? "var(--brand)" : undefined }}>
+      <Link
+        href="/categories"
+        style={{ color: pathname.startsWith("/categories") || pathname.startsWith("/c/") ? "var(--brand)" : undefined }}
+      >
         <IconGrid size={19} />
         <span>版块</span>
       </Link>
-      <Link href="/compose" style={{ color: "var(--brand)", fontWeight: 650 }}>
+      <Link
+        href="/compose"
+        aria-label="发布内容"
+        style={{
+          width: 44,
+          height: 36,
+          minWidth: 44,
+          minHeight: 36,
+          borderRadius: 12,
+          background: "var(--brand-gradient)",
+          color: "#fff",
+          boxShadow: "0 4px 12px rgba(59, 91, 219, 0.34)",
+        }}
+      >
         <IconPlus size={20} />
-        <span>发布</span>
       </Link>
       <Link href={user ? "/messages" : "/login"} style={{ color: pathname.startsWith("/messages") ? "var(--brand)" : undefined }}>
         <IconMessage size={19} />
         <span>消息</span>
-        {!!dmUnread?.unread && (
+        {msgHasUnread && (
           <span
             style={{
               position: "absolute",
@@ -673,6 +547,7 @@ export function MobileBottomNav() {
               height: 7,
               borderRadius: 999,
               background: "var(--danger)",
+              boxShadow: "0 0 0 2px var(--bg-card)",
             }}
           />
         )}
@@ -685,7 +560,7 @@ export function MobileBottomNav() {
   );
 }
 
-/** 返回顶部悬浮按钮 */
+/** 返回顶部悬浮按钮（Framer Motion 弹性出入场） */
 export function BackToTop() {
   const [visible, setVisible] = useState(false);
 
@@ -695,31 +570,40 @@ export function BackToTop() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  if (!visible) return null;
   return (
-    <button
-      type="button"
-      onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
-      aria-label="返回顶部"
-      title="返回顶部"
-      className="card surface-glass card-interactive hide-mobile"
-      style={{
-        position: "fixed",
-        right: 24,
-        bottom: 28,
-        width: 40,
-        height: 40,
-        borderRadius: 999,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        color: "var(--text-2)",
-        cursor: "pointer",
-        zIndex: 90,
-        boxShadow: "var(--shadow-pop)",
-      }}
-    >
-      <IconArrowUp size={16} />
-    </button>
+    <AnimatePresence>
+      {visible && (
+        <motion.button
+          type="button"
+          initial={{ opacity: 0, y: 14, scale: 0.88 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 10, scale: 0.9 }}
+          whileHover={{ y: -2 }}
+          whileTap={{ scale: 0.94 }}
+          transition={{ type: "spring", stiffness: 420, damping: 28 }}
+          onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+          aria-label="返回顶部"
+          title="返回顶部"
+          className="card surface-glass hide-mobile"
+          style={{
+            position: "fixed",
+            right: 24,
+            bottom: 28,
+            width: 40,
+            height: 40,
+            borderRadius: 999,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "var(--text-2)",
+            cursor: "pointer",
+            zIndex: 90,
+            boxShadow: "var(--shadow-pop)",
+          }}
+        >
+          <IconArrowUp size={16} />
+        </motion.button>
+      )}
+    </AnimatePresence>
   );
 }

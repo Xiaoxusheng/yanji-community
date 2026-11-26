@@ -4,13 +4,14 @@
 import Link from "next/link";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { motion } from "framer-motion";
 import { api, timeAgo, type PageData } from "@/lib/api";
 import type { NotificationItem } from "@/lib/types";
 import { ListSkeleton, ErrorState, EmptyState, PageHeader, Pagination } from "@/components/ui/States";
 import { AuthShell } from "@/components/auth/forms";
 import { useMe } from "@/lib/auth";
 import { toast } from "@/lib/toast";
-import { IconCheck, IconTrash } from "@/components/ui/Icons";
+import { IconCheck, IconCheckCheck, IconTrash } from "@/components/ui/Icons";
 
 const typeLabels: Record<string, string> = {
   comment: "评论",
@@ -86,39 +87,61 @@ export default function NotificationsPage() {
   };
 
   return (
-    <div style={{ maxWidth: 740, margin: "0 auto" }}>
+    <div style={{ maxWidth: 760, margin: "0 auto" }}>
       <PageHeader
+        eyebrow="Notifications"
         title="通知中心"
         subtitle="新回复、赞同、私信与管理消息汇总"
         action={
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <div className="seg-tabs">
-              <button
-                type="button"
-                className={`seg-tab ${!unreadOnly ? "is-active" : ""}`}
-                style={{ padding: "5px 10px", fontSize: 12.5 }}
-                onClick={() => {
-                  setUnreadOnly(false);
-                  setPage(1);
-                }}
-              >
-                全部
-              </button>
-              <button
-                type="button"
-                className={`seg-tab ${unreadOnly ? "is-active" : ""}`}
-                style={{ padding: "5px 10px", fontSize: 12.5 }}
-                onClick={() => {
-                  setUnreadOnly(true);
-                  setPage(1);
-                }}
-              >
-                未读
-              </button>
+              {[
+                { key: false, label: "全部" },
+                { key: true, label: "未读" },
+              ].map((opt) => {
+                const active = unreadOnly === opt.key;
+                return (
+                  <button
+                    key={String(opt.key)}
+                    type="button"
+                    onClick={() => {
+                      setUnreadOnly(opt.key);
+                      setPage(1);
+                    }}
+                    style={{
+                      position: "relative",
+                      padding: "5px 11px",
+                      borderRadius: 7,
+                      border: "none",
+                      background: "transparent",
+                      color: active ? "var(--text-1)" : "var(--text-2)",
+                      fontSize: 12.5,
+                      fontWeight: active ? 620 : 500,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {active && (
+                      <motion.span
+                        layoutId="notif-tab-pill"
+                        transition={{ type: "spring", stiffness: 460, damping: 34 }}
+                        style={{
+                          position: "absolute",
+                          inset: 0,
+                          borderRadius: 7,
+                          background: "var(--bg-card)",
+                          boxShadow: "0 1px 2px rgba(15, 23, 42, 0.08), 0 0 0 1px var(--border)",
+                          zIndex: 0,
+                        }}
+                      />
+                    )}
+                    <span style={{ position: "relative", zIndex: 1 }}>{opt.label}</span>
+                  </button>
+                );
+              })}
             </div>
             <select
               className="select"
-              style={{ width: 116, padding: "6px 10px", fontSize: 13 }}
+              style={{ width: 118, padding: "6.5px 10px", fontSize: 13 }}
               value={type}
               onChange={(e) => {
                 setType(e.target.value);
@@ -132,7 +155,7 @@ export default function NotificationsPage() {
               ))}
             </select>
             <button className="btn btn-secondary btn-sm" onClick={markAll}>
-              全部已读
+              <IconCheckCheck size={14} /> 全部已读
             </button>
           </div>
         }
@@ -143,17 +166,20 @@ export default function NotificationsPage() {
       {list.data && list.data.items.length === 0 && (
         <EmptyState title="暂无通知" description="收到评论、点赞、关注或私信时会提醒你" />
       )}
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
         {(list.data?.items ?? []).map((n) => (
           <div
             key={n.id}
             className="card card-interactive"
             style={{
-              padding: "14px 16px",
+              padding: "14px 18px",
               display: "flex",
               gap: 12,
               alignItems: "flex-start",
               borderLeft: n.read_at ? undefined : "3px solid var(--brand)",
+              background: n.read_at
+                ? undefined
+                : "linear-gradient(90deg, var(--brand-soft) 0%, var(--bg-card) 30%)",
             }}
           >
             <div style={{ flex: 1, minWidth: 0 }}>
